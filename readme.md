@@ -3,7 +3,7 @@
 ## 1. Cloning the Repository
 
 ```shell
-git clone https://github.com/ShuzhaoXie/sizegs.git
+git clone https://github.com/mmlab-sigs/sizegs
 ```
 
 ## 2. Install
