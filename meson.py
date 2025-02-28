@@ -13,11 +13,11 @@ import os
 import numpy as np
 
 import subprocess
-cmd = 'nvidia-smi -q -d Memory |grep -A4 GPU|grep Used'
-result = subprocess.run(cmd, shell=True, stdout=subprocess.PIPE).stdout.decode().split('\n')
-os.environ['CUDA_VISIBLE_DEVICES']=str(np.argmin([int(x.split()[2]) for x in result[:-1]]))
+# cmd = 'nvidia-smi -q -d Memory |grep -A4 GPU|grep Used'
+# result = subprocess.run(cmd, shell=True, stdout=subprocess.PIPE).stdout.decode().split('\n')
+# os.environ['CUDA_VISIBLE_DEVICES']=str(np.argmin([int(x.split()[2]) for x in result[:-1]]))
 
-os.system('echo $CUDA_VISIBLE_DEVICES')
+# os.system('echo $CUDA_VISIBLE_DEVICES')
 
 
 import torch
@@ -155,7 +155,7 @@ def training(dataset, opt, pipe, dataset_name, testing_iterations, saving_iterat
 
     for target_qbit in range(8,10):
         gaussians = GaussianModel(dataset.feat_dim, dataset.n_offsets, dataset.voxel_size, dataset.update_depth, dataset.update_init_factor, dataset.update_hierachy_factor, dataset.use_feat_bank, 
-                                dataset.appearance_dim, dataset.ratio, dataset.add_opacity_dist, dataset.add_cov_dist, dataset.add_color_dist, dataset.raht)
+                                dataset.appearance_dim, dataset.ratio, dataset.add_opacity_dist, dataset.add_cov_dist, dataset.add_color_dist, dataset.raht, dataset.use_pcc)
         scene = Scene(dataset, gaussians, load_iteration=load_iteration, shuffle=False)
 
         all_anchor_size = int(gaussians._anchor.shape[0])
@@ -254,14 +254,21 @@ def training(dataset, opt, pipe, dataset_name, testing_iterations, saving_iterat
 
 
     logger.info(final_qbits)
-
+    
+    logger.info('probe time: {}'.format(time.time() - t))
     #再次规划
+    
+    bg = time.time()
     gaussians = GaussianModel(dataset.feat_dim, dataset.n_offsets, dataset.voxel_size, dataset.update_depth, dataset.update_init_factor, dataset.update_hierachy_factor, dataset.use_feat_bank, 
-                            dataset.appearance_dim, dataset.ratio, dataset.add_opacity_dist, dataset.add_cov_dist, dataset.add_color_dist, dataset.raht)
+                            dataset.appearance_dim, dataset.ratio, dataset.add_opacity_dist, dataset.add_cov_dist, dataset.add_color_dist, dataset.raht, dataset.use_pcc)
     scene = Scene(dataset, gaussians, load_iteration=load_iteration, shuffle=False)
     all_anchor_size = int(gaussians._anchor.shape[0])
     gaussians.training_setup(opt)
     
+    logger.info('load gaussian model time: {}'.format(time.time() - bg))
+    
+    
+    bg = time.time()
     with torch.no_grad():
         gaussians.eval()
         imp = cal_imp(gaussians, scene.getTrainCameras(), pipe, background)
@@ -272,21 +279,33 @@ def training(dataset, opt, pipe, dataset_name, testing_iterations, saving_iterat
         pmask = prune_mask(purne_percent, imp)
         imp = imp[torch.logical_not(pmask)]
         gaussians.prune_anchor(pmask)
+    logger.info('cal imp: {}'.format(time.time() - bg))
     
+    bg = time.time()
     gaussians.octree_init_train()
     gaussians.train()
     torch.cuda.empty_cache()
     
+    logger.info('octree init: {}'.format(time.time() - bg))
+    
+    bg = time.time()
     gaussians.training_setup(opt)
     gaussians.train()
 
     gaussians.octree_train(imp, dataset.oct_merge, raht=dataset.raht)
-
+    logger.info('octree train init: {}'.format(time.time() - bg))
+    
+    bg = time.time()
     gaussians.init_qas(pipe.n_block, [best_qbit]*73)
+    logger.info('init qas: {}'.format(time.time() - bg))
 
+    bg = time.time()
     dp=False
     gaussians.set_dp_split(dp=dp, unit_length=dataset.unit_length, n_block = pipe.n_block)
-
+    logger.info('set_dp_split: {}'.format(time.time() - bg))
+    
+    
+    bg = time.time()
     model_size_limit = dataset.target_size*1024*1024
     N1 = 73
 
@@ -323,6 +342,8 @@ def training(dataset, opt, pipe, dataset_name, testing_iterations, saving_iterat
             if variable[f"x{i*16+j}"].varValue != 0:
                 qbits[i] = j+1
 
+    logger.info('qbit searching: {}'.format(time.time() - bg))
+    
     gaussians.init_qas(pipe.n_block, qbits)
 
     minimized_value = prob.objective.value()
@@ -333,9 +354,8 @@ def training(dataset, opt, pipe, dataset_name, testing_iterations, saving_iterat
 
     print("final qbits", final_qbits)
 
-
     gaussians = GaussianModel(dataset.feat_dim, dataset.n_offsets, dataset.voxel_size, dataset.update_depth, dataset.update_init_factor, dataset.update_hierachy_factor, dataset.use_feat_bank, 
-                              dataset.appearance_dim, dataset.ratio, dataset.add_opacity_dist, dataset.add_cov_dist, dataset.add_color_dist, dataset.raht)
+                              dataset.appearance_dim, dataset.ratio, dataset.add_opacity_dist, dataset.add_cov_dist, dataset.add_color_dist, dataset.raht, dataset.use_pcc)
     scene = Scene(dataset, gaussians, load_iteration=load_iteration, shuffle=False)
     gaussians.training_setup(opt)
     
@@ -592,7 +612,7 @@ def render_sets(train_ds : ModelParams, iteration : int, pipeline : PipelinePara
         dataset.raht = False
         
         gaussians = GaussianModel(dataset.feat_dim, dataset.n_offsets, dataset.voxel_size, dataset.update_depth, dataset.update_init_factor, dataset.update_hierachy_factor, dataset.use_feat_bank, 
-                              dataset.appearance_dim, dataset.ratio, dataset.add_opacity_dist, dataset.add_cov_dist, dataset.add_color_dist)
+                              dataset.appearance_dim, dataset.ratio, dataset.add_opacity_dist, dataset.add_cov_dist, dataset.add_color_dist, raht=False, use_pcc=dataset.use_pcc)
         scene = Scene(dataset, gaussians, load_iteration=iteration, shuffle=False, load_compressed=load_compressed)
         gaussians.eval()
 
@@ -753,10 +773,10 @@ if __name__ == "__main__":
 
     logger.info(f'args: {args}')
 
-    if args.gpu != '-1':
-        os.environ['CUDA_VISIBLE_DEVICES'] = str(args.gpu)
-        os.system("echo $CUDA_VISIBLE_DEVICES")
-        logger.info(f'using GPU {args.gpu}')
+    # if args.gpu != '-1':
+    #     os.environ['CUDA_VISIBLE_DEVICES'] = str(args.gpu)
+    #     os.system("echo $CUDA_VISIBLE_DEVICES")
+    #     logger.info(f'using GPU {args.gpu}')
 
         
     dataset = args.source_path.split('/')[-1]

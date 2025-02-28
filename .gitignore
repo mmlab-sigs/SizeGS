@@ -1,0 +1,15 @@
+outputs
+__pycache__
+__pycache__/*.pyc
+**/__pycache__/*.pyc
+
+.vscode
+
+**/build
+**/*.egg-info
+
+renderdata
+runs
+check_metrics.py
+
+exp_data

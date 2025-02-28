@@ -83,6 +83,7 @@ class ModelParams(ParamGroup):
         self.mesongs = False
         self.load_path = ''
         self.raht = False
+        self.use_pcc = False
         self.unit_length = 1000
         
         super().__init__(parser, "Loading Parameters", sentinel)

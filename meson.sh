@@ -8,12 +8,11 @@ log=$5
 block=$6
 size=$7
 time=$(date "+%Y-%m-%d_%H:%M:%S")
-logdir=sizegs
+logdir=sizegs_gpcc
 
-python meson.py \
-    --eval -s path/to/data/${log}/${name} \
+CUDA_VISIBLE_DEVICES=1 python meson.py \
+    --eval -s ~/storage/nerf_data/${log}/${name} \
     --lod 0 \
-    --gpu 2 \
     --voxel_size ${voxel} \
     --target_size $size \
     --update_init_factor 4 \
@@ -33,6 +32,6 @@ python meson.py \
     --n_block $block \
     --mesongs \
     --raht \
-    --debug \
-    --load_path path/to/outputs/${log}/${name}/baseline \
-    -m path/to/outputs/${log}/${name}/${logdir}/${time}
+    --use_pcc \
+    --load_path outputs/${log}/${name}/baseline/scaffold \
+    -m outputs/${log}/${name}/${logdir}/${time}

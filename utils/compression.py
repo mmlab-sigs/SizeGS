@@ -2,6 +2,9 @@ import numpy as np
 import torch
 import octree_cuda
 import time
+from typing import Union
+from plyfile import PlyData
+import os
 
 class UniqueWithGrad(torch.autograd.Function):
     @staticmethod
@@ -79,7 +82,7 @@ def d1halfing_fast_torch(pmin, pmax, pdepht):
     return torch.linspace(pmin, pmax, steps=2**int(pdepht) + 1).to('cuda')
 
 
-def create_octree_train(ppoints, pfeatures, imp, pdepht, oct_merge):
+def create_octree_train(ppoints, pfeatures, imp, pdepht, oct_merge, use_pcc=False):
     ori_points_num = ppoints.shape[0]
     # t = time.time()
     torch.cuda.synchronize()  # 在可能出错的CUDA操作之前调用
@@ -139,6 +142,12 @@ def create_octree_train(ppoints, pfeatures, imp, pdepht, oct_merge):
 
     # 堆叠 NumPy 数组
     V = np.vstack([occodex_np, occodey_np, occodez_np]).T
+    
+    if use_pcc:
+        V, features, indices_sorted = sorted_voxels(V, features)
+        
+    d_xyz = d_xyz[indices_sorted]
+    
     # V = np.array([occodex.cpu(),occodey.cpu(),occodez.cpu()], dtype=int).T
     # V = torch.stack([occodex.cpu(), occodey.cpu(), occodez.cpu()], dim=1).numpy()
     ki = ki.detach().cpu().numpy()
@@ -228,7 +237,7 @@ def decode_oct(paramarr, oct, depth):
     occodex=(oct/(2**(depth*2))).astype(int)
     occodey=((oct-occodex*(2**(depth*2)))/(2**depth)).astype(int)
     occodez=(oct-occodex*(2**(depth*2))-occodey*(2**depth)).astype(int)  
-    V = np.array([occodex,occodey,occodez], dtype=int).T
+    V = np.array([occodex,occodey,occodez], dtype=int).T # [P, 3]
     koorx=xletra[occodex]
     koory=yletra[occodey]
     koorz=zletra[occodez]
@@ -236,6 +245,102 @@ def decode_oct(paramarr, oct, depth):
 
     return ori_points, V
 
+def decode_v(paramarr, V, depth):
+    minx=(paramarr[0])
+    maxx=(paramarr[1])
+    miny=(paramarr[2])
+    maxy=(paramarr[3])
+    minz=(paramarr[4])
+    maxz=(paramarr[5])
+    xletra=d1halfing_fast(minx,maxx,depth)
+    yletra=d1halfing_fast(miny,maxy,depth)
+    zletra=d1halfing_fast(minz,maxz,depth)
+    # occodex=(oct/(2**(depth*2))).astype(int)
+    # occodey=((oct-occodex*(2**(depth*2)))/(2**depth)).astype(int)
+    # occodez=(oct-occodex*(2**(depth*2))-occodey*(2**depth)).astype(int)  
+    # V = np.array([occodex,occodey,occodez], dtype=int).T
+    V = V.astype(int)
+    assert V.shape[-1] == 3
+    koorx=xletra[V[:, 0].reshape(-1)]
+    koory=yletra[V[:, 1].reshape(-1)]
+    koorz=zletra[V[:, 2].reshape(-1)]
+    ori_points=np.array([koorx,koory,koorz]).T
+
+    return ori_points, V
+
+
+def sorted_voxels(voxelized_means: np.ndarray, other_params = None) -> Union[np.ndarray, tuple]:
+    """
+    Sort voxels by their Morton code.
+    """
+    indices_sorted = np.argsort(voxelized_means @ np.power(voxelized_means.max() + 1, np.arange(voxelized_means.shape[1])), axis=0)
+    voxelized_means = voxelized_means[indices_sorted]
+    if other_params is None:
+        return voxelized_means
+    other_params = other_params[indices_sorted]
+    return voxelized_means, other_params, indices_sorted
+
+
+def gpcc_encode(ply_path: str, bin_path: str, encoder_path='/home/szxie/storage/mpeg-pcc-tmc13/build/tmc3/tmc3') -> None:
+    """
+    Compress geometry point cloud by GPCC codec.
+    """
+    enc_cmd = (f'{encoder_path} '
+               f'--mode=0 --trisoupNodeSizeLog2=0 --mergeDuplicatedPoints=0 --neighbourAvailBoundaryLog2=8 '
+               f'--intra_pred_max_node_size_log2=3 --positionQuantizationScale=1 --inferredDirectCodingMode=3 '
+               f'--maxNumQtBtBeforeOt=2 --minQtbtSizeLog2=0 --planarEnabled=0 --planarModeIdcmUse=0 --cabac_bypass_stream_enabled_flag=1 '
+               f'--uncompressedDataPath={ply_path} --compressedStreamPath={bin_path} ')
+    enc_cmd += '> nul 2>&1' if os.name == 'nt' else '> /dev/null 2>&1'
+    exit_code = os.system(enc_cmd)
+    assert exit_code == 0, f'GPCC encoder failed with exit code {exit_code}.'
+
+
+def gpcc_decode(bin_path: str, recon_path: str, decoder_path='/home/szxie/storage/mpeg-pcc-tmc13/build/tmc3/tmc3') -> None:
+    """
+    Decompress geometry point cloud by GPCC codec.
+    """
+    dec_cmd = (f'{decoder_path} '
+               f'--mode=1 --outputBinaryPly=1 '
+               f'--compressedStreamPath={bin_path} --reconstructedDataPath={recon_path} ')
+    dec_cmd += '> nul 2>&1' if os.name == 'nt' else '> /dev/null 2>&1'
+    exit_code = os.system(dec_cmd)
+    assert exit_code == 0, f'GPCC decoder failed with exit code {exit_code}.'
+
+
+def write_ply_geo_ascii(geo_data: np.ndarray, ply_path: str) -> None:
+    """
+    Write geometry point cloud to a .ply file in ASCII format.
+    """
+    assert ply_path.endswith('.ply'), 'Destination path must be a .ply file.'
+    assert geo_data.ndim == 2 and geo_data.shape[1] == 3, 'Input data must be a 3D point cloud.'
+    geo_data = geo_data.astype(int)
+    with open(ply_path, 'w') as f:
+        # write header
+        f.writelines(['ply\n', 'format ascii 1.0\n', f'element vertex {geo_data.shape[0]}\n',
+                      'property float x\n', 'property float y\n', 'property float z\n', 'end_header\n'])
+        # write data
+        for point in geo_data:
+            f.write(f'{point[0]} {point[1]} {point[2]}\n')
+
+
+def read_ply_geo_bin(ply_path: str) -> np.ndarray:
+    """
+    Read geometry point cloud from a .ply file in binary format.
+    """
+    assert ply_path.endswith('.ply'), 'Source path must be a .ply file.'
+
+    ply_data = PlyData.read(ply_path).elements[0]
+    means = np.stack([ply_data.data[name] for name in ['x', 'y', 'z']], axis=1)  # shape (N, 3)
+    return means
+
+# def sorted_orig_voxels(voxelized_means, other_params=None):
+#     # means = means.detach().cpu().numpy().astype(np.float32)
+#     # voxelized_means, means_min, means_max = voxelize(means=means)
+    
+#     voxelized_means, other_params = sorted_voxels(voxelized_means=voxelized_means, other_params=other_params)
+#     means = devoxelize(voxelized_means=voxelized_means, means_min=means_min, means_max=means_max)
+#     means = torch.from_numpy(means).cuda().to(torch.float32)
+#     return means, other_params
 
 
 # def create_octree_train_test(ppoints, pfeatures, imp, pdepht, oct_merge):

@@ -25,7 +25,7 @@ from scene.embedding import Embedding
 import shutil
 import time
 
-from utils.compression import create_octree, decode_oct ,create_octree_train, d1halfing_fast
+from utils.compression import create_octree, decode_oct, create_octree_train, d1halfing_fast, sorted_voxels, write_ply_geo_ascii, gpcc_encode, gpcc_decode, read_ply_geo_bin, decode_v
 from utils.quant_utils import VanillaQuan, Quant_all, split_length, seg_quant, seg_quant_forward, seg_quant_reverse, dp_split
 from raht_torch import copyAsort, haar3D_param, inv_haar3D_param, itransform_batched_torch, transform_batched_torch
 class GaussianModel:
@@ -62,6 +62,7 @@ class GaussianModel:
                  add_cov_dist : bool = False,
                  add_color_dist : bool = False,
                  raht: bool = False,
+                 use_pcc: bool = False,
                  ):
 
         self.feat_dim = feat_dim
@@ -94,7 +95,7 @@ class GaussianModel:
         self.offset_denom = torch.empty(0)
 
         self.anchor_demon = torch.empty(0)
-                
+        
         self.optimizer = None
         self.percent_dense = 0
         self.spatial_lr_scale = 0
@@ -103,6 +104,7 @@ class GaussianModel:
         # add by mesongs
         self.raht = raht
         self.feature_channels = -1
+        self.use_pcc = use_pcc
 
         if self.use_feat_bank:
             self.mlp_feature_bank = nn.Sequential(
@@ -553,7 +555,7 @@ class GaussianModel:
             p += 2*n_block 
         ret = torch.concat(ret, dim=-1)
         return ret
-        
+    
     def save_compressed(self, save_dir):
         os.makedirs(save_dir, exist_ok=True)
         bin_dir = os.path.join(save_dir, 'bins')
@@ -579,13 +581,44 @@ class GaussianModel:
         np_split_0 = np.array(self.dp_split[0])
         np_split_1 = np.array(self.dp_split[32])
         
-        # print("save")
-        # print(self.oct.shape
-        np.savez_compressed(os.path.join(bin_dir, 'oct'), points=self.oct, params=self.oct_param)
-        # np.savez_compressed(os.path.join(bin_dir, 'oct'), points=self.oct, params=self.oct_param, xyz = self._anchor_v.cpu().numpy())
-        # np.savez_compressed(os.path.join(bin_dir, 'fe'), f=ff.cpu().numpy(), i_16=qf_16.cpu().numpy().astype(np.uint16), t=trans)#这里需要改一下
-        # np.savez_compressed(os.path.join(bin_dir, 'fe'), f=ff.cpu().numpy(), t=trans)#这里需要改一下
-        np.savez_compressed(os.path.join(bin_dir, 'fe'), f=ff.cpu().numpy(), i_8=qf_8.cpu().numpy().astype(np.uint8), i_16=qf_16.cpu().numpy().astype(np.uint16), t=trans, h=self.high_bit_channels, s0=np_split_0, s1=np_split_1)#这里需要改一下
+        
+        if self.use_pcc:
+            tmp_dir = os.path.join(save_dir)
+            os.makedirs(tmp_dir, exist_ok=True)
+            ply_path = os.path.join(tmp_dir, 'voxelized_means.ply')
+            means_bin_path = os.path.join(bin_dir, 'compressed.bin')
+            write_ply_geo_ascii(geo_data=self.V, ply_path=ply_path)
+            gpcc_encode(
+                ply_path=ply_path, 
+                bin_path=means_bin_path)
+            np.savez_compressed(
+                os.path.join(bin_dir, 'fe'), 
+                f=ff.cpu().numpy(), 
+                i_8=qf_8.cpu().numpy().astype(np.uint8), 
+                i_16=qf_16.cpu().numpy().astype(np.uint16), 
+                t=trans, 
+                h=self.high_bit_channels, 
+                s0=np_split_0, 
+                s1=np_split_1,
+                o=self.oct_param)#这里需要改一下
+        else:
+            # print("save")
+            # print(self.oct.shape
+            np.savez_compressed(os.path.join(bin_dir, 'oct'), points=self.oct, params=self.oct_param)
+        
+            # np.savez_compressed(os.path.join(bin_dir, 'oct'), points=self.oct, params=self.oct_param, xyz = self._anchor_v.cpu().numpy())
+            # np.savez_compressed(os.path.join(bin_dir, 'fe'), f=ff.cpu().numpy(), i_16=qf_16.cpu().numpy().astype(np.uint16), t=trans)#这里需要改一下
+            # np.savez_compressed(os.path.join(bin_dir, 'fe'), f=ff.cpu().numpy(), t=trans)#这里需要改一下
+            np.savez_compressed(
+                os.path.join(bin_dir, 'fe'), 
+                f=ff.cpu().numpy(), 
+                i_8=qf_8.cpu().numpy().astype(np.uint8), 
+                i_16=qf_16.cpu().numpy().astype(np.uint16), 
+                t=trans, 
+                h=self.high_bit_channels, 
+                s0=np_split_0, 
+                s1=np_split_1)#这里需要改一下
+
         self.save_mlp_checkpoints(bin_dir)
         
         bin_zip_path = os.path.join(save_dir, 'bins.zip')
@@ -600,25 +633,43 @@ class GaussianModel:
 
         
     def load_compressed(self, save_path):
+        # self.use_pcc = use_pcc
         t = time.time()
         if save_path[-4:] == '.zip':
             print('Assume the input file path is a .zip file')
             
             bin_dir = os.path.join('/'.join(save_path.split('/')[:-1]), 'bins_tmp')
+            tmp_dir = os.path.join('/'.join(save_path.split('/')[:-1]), 'tmp2')
             if os.path.exists(bin_dir):
                 shutil.rmtree(bin_dir)
             os.system(f'unzip {save_path} -d {bin_dir}')
         else:
             print('Assume the input file path is a dir that contains a \'bins\' dir')
             bin_dir = os.path.join(save_path, 'bins')
+            tmp_dir = os.path.join(save_path, 'tmp2')
         print('load ply from:', bin_dir)
         
-        oct_vals = np.load(os.path.join(bin_dir, 'oct.npz'))
-        octree = oct_vals["points"]
-        oct_param = oct_vals["params"]
-        # xyz = oct_vals["xyz"]
-        
-        attris = np.load(os.path.join(bin_dir, 'fe.npz'))
+        if os.path.exists(tmp_dir):
+            shutil.rmtree(tmp_dir)
+        os.makedirs(tmp_dir)
+                
+        if self.use_pcc:
+            print('load compressed: use_pcc')
+            ply_path = os.path.join(tmp_dir, 'voxelized_means.ply')
+            means_bin_path = os.path.join(bin_dir, 'compressed.bin')
+            gpcc_decode(bin_path=means_bin_path, recon_path=ply_path)
+            voxelized_means = read_ply_geo_bin(ply_path=ply_path).astype(np.float32)
+            voxelized_means = sorted_voxels(voxelized_means)  # decoded voqxelized means are unsorted, thus need sorting
+            attris = np.load(os.path.join(bin_dir, 'fe.npz'))
+            oct_param = attris['o']
+        else:
+            oct_vals = np.load(os.path.join(bin_dir, 'oct.npz'))
+            octree = oct_vals["points"]
+            oct_param = oct_vals["params"]
+            # xyz = oct_vals["xyz"]
+            
+            attris = np.load(os.path.join(bin_dir, 'fe.npz'))
+            
         high = attris['h']
         low = [i for i in range(73) if i not in high]
         ff = torch.tensor(attris['f'], dtype=torch.float32).cuda()
@@ -641,7 +692,10 @@ class GaussianModel:
         self.depth = depth
         self.n_block = n_block
         
-        dxyz, V = decode_oct(oct_param, octree, depth)
+        if self.use_pcc:
+            dxyz, V = decode_v(oct_param, voxelized_means, depth)
+        else:
+            dxyz, V = decode_oct(oct_param, octree, depth)
         # dxyz = xyz
 
         dqf = self.apply_quant_reverse(qf, trans, 2, n_block)
@@ -718,7 +772,6 @@ class GaussianModel:
         self.depth = int(np.round(np.log2(1/self.voxel_size)) + 2)
         print('self.depth', self.depth)
         # TODO: move to TorchSparse Voxelization.
-
         
         V, features, oct, paramarr, _, _ = create_octree(
             self._anchor.detach().cpu().numpy(), 
@@ -726,9 +779,12 @@ class GaussianModel:
             imp,
             depth=self.depth,
             oct_merge=merge_type)
+
+        # V, features = sorted_voxels(V, features)
+        
+        # print('sort V and features, for gcc')
         d_anchors, _ = decode_oct(paramarr, oct, self.depth)
 
-        
         if raht:
             # morton sort
             w, val, reorder = copyAsort(V)
@@ -736,7 +792,7 @@ class GaussianModel:
             self.res = haar3D_param(self.depth, w, val)
             self.res_inv = inv_haar3D_param(V, self.depth)
         
-        
+        self.V = V
         self.oct = oct
         self.oct_param = paramarr
         self._anchor = nn.Parameter(torch.tensor(d_anchors, dtype=torch.float, device="cuda").requires_grad_(True))
@@ -800,9 +856,10 @@ class GaussianModel:
             features,
             imp,
             pdepht=self.depth,
-            oct_merge=merge_type)
+            oct_merge=merge_type,
+            use_pcc=self.use_pcc)
         self.octree_imp = octree_imp
-             
+        
         if raht:
             # morton sort
             w, val, reorder = copyAsort(V)
