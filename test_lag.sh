@@ -1,7 +1,7 @@
 #!/bin/bash
 
 name=bicycle
-iter=1
+iter=1000
 length=1000
 voxel=0.0001
 log=360_v2
@@ -10,8 +10,8 @@ size=36
 time=$(date "+%Y-%m-%d_%H:%M:%S")
 logdir=sizegs_gpcc
 
-CUDA_VISIBLE_DEVICES=0 python meson.py \
-    --eval -s ~/storage/nerf_data/${log}/${name} \
+CUDA_VISIBLE_DEVICES=1 python meson.py \
+    --eval -s /mnt/storage/users/szxie_data/nerf_data/${log}/${name} \
     --lod 0 \
     --voxel_size ${voxel} \
     --target_size $size \

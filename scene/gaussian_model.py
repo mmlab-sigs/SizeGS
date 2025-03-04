@@ -25,8 +25,9 @@ from scene.embedding import Embedding
 import shutil
 import time
 
+
 from utils.compression import create_octree, decode_oct, create_octree_train, d1halfing_fast, sorted_voxels, write_ply_geo_ascii, gpcc_encode, gpcc_decode, read_ply_geo_bin, decode_v
-from utils.quant_utils import VanillaQuan, Quant_all, split_length, seg_quant, seg_quant_forward, seg_quant_reverse, dp_split
+from utils.quant_utils import VanillaQuan, Quant_all, BatchQuant, split_length, seg_quant, seg_quant_forward, seg_quant_reverse, dp_split, pure_quant, quant_reverse, cal_diff_wrapper
 from raht_torch import copyAsort, haar3D_param, inv_haar3D_param, itransform_batched_torch, transform_batched_torch
 class GaussianModel:
 
@@ -62,7 +63,11 @@ class GaussianModel:
                  add_cov_dist : bool = False,
                  add_color_dist : bool = False,
                  raht: bool = False,
+                 n_block: int = 60,
+                 unit_length: int = 100,
                  use_pcc: bool = False,
+                 logger = None,
+                 enable_octree_training: bool=False,
                  ):
 
         self.feat_dim = feat_dim
@@ -103,9 +108,14 @@ class GaussianModel:
         
         # add by mesongs
         self.raht = raht
-        self.feature_channels = -1
+        self.n_channel = -1
         self.use_pcc = use_pcc
-
+        self.logger = logger 
+        self.n_block = n_block 
+        self.unit_length = unit_length
+        self.bqa = None
+        self.enable_octree_training = enable_octree_training
+        
         if self.use_feat_bank:
             self.mlp_feature_bank = nn.Sequential(
                 nn.Linear(3+1, feat_dim),
@@ -140,18 +150,23 @@ class GaussianModel:
 
 
     def eval(self):
+        self.training = False
         self.mlp_opacity.eval()
         self.mlp_cov.eval()
         self.mlp_color.eval()
+        if self.bqa is not None:
+            self.bqa.eval()
         if self.appearance_dim > 0:
             self.embedding_appearance.eval()
         if self.use_feat_bank:
             self.mlp_feature_bank.eval()
 
     def train(self):
+        self.training = True
         self.mlp_opacity.train()
         self.mlp_cov.train()
         self.mlp_color.train()
+        self.bqa.train()
         if self.appearance_dim > 0:
             self.embedding_appearance.train()
         if self.use_feat_bank:                   
@@ -252,6 +267,8 @@ class GaussianModel:
     def get_covariance_v(self, scaling_modifier = 1):
         return self.covariance_activation(self.get_scaling_v, scaling_modifier, self._rotation_v)
     
+    
+    
     def voxelize_sample(self, data=None, voxel_size=0.01):
         np.random.shuffle(data)
         data = np.unique(np.round(data/voxel_size), axis=0)*voxel_size
@@ -312,6 +329,7 @@ class GaussianModel:
 
 
     def training_setup(self, training_args):
+        self.training = True
         self.percent_dense = training_args.percent_dense
 
         self.opacity_accum = torch.zeros((self.get_anchor.shape[0], 1), device="cuda")
@@ -462,11 +480,12 @@ class GaussianModel:
 
     def apply_raht_forward(self):
         rf = torch.concat([
-            self._anchor_feat_v.detach(), 
-            self._offset_v.detach().flatten(-2).contiguous(), 
-            self._opacity_v.detach().contiguous(), 
-            self._scaling_v.detach(), 
-            self._rotation_v.detach()], -1)
+            self._anchor_feat.detach(), 
+            self._offset.detach().flatten(-2).contiguous(), 
+            self._opacity.detach().contiguous(), 
+            self._scaling.detach(), 
+            self._rotation.detach()], -1)
+        
 
         C = rf[self.reorder]
         iW1 = self.res['iW1']
@@ -529,31 +548,47 @@ class GaussianModel:
         return draht_features
         
     
-    def apply_quant_forward(self, f):
-        qa_cnt = 0
-        ret = torch.zeros_like(f)
-        trans = []
-        # splits = split_length(f.shape[0], self.n_block)
-        splits = self.dp_split
-        assert f.shape[0]==sum(splits[0]), "split length is error"
-        for i in range(f.shape[-1]):
-            qfi, sz = seg_quant_forward(f[:, i], splits[i], self.qas[qa_cnt : qa_cnt + self.n_block])
-            qa_cnt += self.n_block
-            ret[:, i] = qfi.reshape(-1).cpu()
-            trans.extend(sz)
-            
-        return ret, trans
+    def apply_quant_forward(self, f):     
+        with torch.no_grad():
+            outputs, scales, zero_points = pure_quant(
+                f,
+                self.dp_split,
+                power_qbits=self.bqa.qbits.to(torch.int32),
+                min_vals=self.bqa.min_vals,
+                max_vals=self.bqa.max_vals
+            )
+            trans = torch.concat([scales.reshape(-1), zero_points.reshape(-1)], dim = 0)
+        # assert f.shape[0]==sum(splits[0]), "split length is error"
+        # for i in range(f.shape[-1]):
+        #     qfi, sz = seg_quant_forward(f[:, i], splits[i], self.qas[qa_cnt : qa_cnt + self.n_block])
+        #     qa_cnt += self.n_block
+        #     ret[:, i] = qfi.reshape(-1).cpu()
+        #     trans.extend(sz)
+        
+        return outputs, trans.cpu().tolist()
     
-    def apply_quant_reverse(self, f, trans_array, p, n_block):
-        ret = []
-        # split = split_length(f.shape[0], n_block)
-        split = self.dp_split
-        assert f.shape[0]==sum(split[0]), "split length is error"
-        for i in range(f.shape[-1]):
-            ri = seg_quant_reverse(f[:, i], split[i], trans_array[p:p+2*n_block])
-            ret.append(ri.reshape(-1, 1))
-            p += 2*n_block 
-        ret = torch.concat(ret, dim=-1)
+    def apply_quant_reverse(self, f: torch.Tensor, trans_array: list, p: int):
+        with torch.no_grad():
+            n_quant = self.n_channel * self.n_block 
+            trans_array = torch.tensor(trans_array).cuda()
+            scales = trans_array[p: p + n_quant].reshape(self.n_channel, self.n_block)
+            zero_points = trans_array[p + n_quant: p + 2*n_quant].reshape(self.n_channel, self.n_block)
+            ret = quant_reverse(
+                f,
+                splits=self.dp_split,
+                scales=scales,
+                zero_points=zero_points
+            )
+        
+        # ret = []
+        # # split = split_length(f.shape[0], n_block)
+        # split = self.dp_split
+        # assert f.shape[0]==sum(split[0]), "split length is error"
+        # for i in range(f.shape[-1]):
+        #     ri = seg_quant_reverse(f[:, i], split[i], trans_array[p:p+2*n_block])
+        #     ret.append(ri.reshape(-1, 1))
+        #     p += 2*n_block 
+        # ret = torch.concat(ret, dim=-1)
         return ret
     
     def save_compressed(self, save_dir):
@@ -578,9 +613,8 @@ class GaussianModel:
         trans.extend(sz)
         qf_16 = qf[:,self.high_bit_channels]
         qf_8 = qf[:,self.low_bit_channels]
-        np_split_0 = np.array(self.dp_split[0])
-        np_split_1 = np.array(self.dp_split[32])
-        
+        np_split_0 = self.dp_split[0].cpu().numpy()
+        np_split_1 = self.dp_split[32].cpu().numpy()
         
         if self.use_pcc:
             tmp_dir = os.path.join(save_dir)
@@ -667,25 +701,25 @@ class GaussianModel:
             octree = oct_vals["points"]
             oct_param = oct_vals["params"]
             # xyz = oct_vals["xyz"]
-            
             attris = np.load(os.path.join(bin_dir, 'fe.npz'))
             
         high = attris['h']
         low = [i for i in range(73) if i not in high]
         ff = torch.tensor(attris['f'], dtype=torch.float32).cuda()
-
+        self.n_channel = ff.shape[0]
+        assert self.n_channel != 1
         i_8 = torch.tensor(attris['i_8'], dtype=torch.float32).cuda()
 
         i_16_np = attris['i_16'].astype(np.int32)
         i_16 = torch.tensor(i_16_np, dtype=torch.float32).cuda()
 
-        qf = torch.zeros((i_8.shape[0], len(high) + len(low))).cuda()
+        qf = torch.zeros((i_8.shape[0], len(high) + len(low))).cuda() # qf: N * C
         qf[:, low] = i_8
         qf[:, high] = i_16
         trans = attris['t']
         split_0 = attris['s0'].tolist()
         split_1 = attris['s1'].tolist()
-        self.dp_split = [split_0]*32 + [split_1]*41
+        self.dp_split = torch.tensor([split_0]*32 + [split_1]*41, dtype=int).cuda()
         
         depth = int(trans[0])
         n_block = int(trans[1])
@@ -698,7 +732,7 @@ class GaussianModel:
             dxyz, V = decode_oct(oct_param, octree, depth)
         # dxyz = xyz
 
-        dqf = self.apply_quant_reverse(qf, trans, 2, n_block)
+        dqf = self.apply_quant_reverse(qf, trans, 2)
         fe = torch.concat([ff.reshape(1, -1), dqf], dim=0)
         
         features = self.apply_raht_reverse(V, fe, depth)
@@ -718,7 +752,7 @@ class GaussianModel:
         self._rotation = nn.Parameter(features[:, base:base+4].cuda().requires_grad_(True))
         base += 4 #73
         print('base, feature size', base)
-        self.feature_channels = base
+        self.n_channel = base
         
         self.load_mlp_checkpoints(bin_dir)
         
@@ -726,16 +760,73 @@ class GaussianModel:
         print('load time', time.time()-t)
         
 
+    def init_bqa(self, qbits, dp: bool):
+        if dp == False:
+            if self.raht:
+                split = split_length(self.n_point - 1, self.n_block)
+            else:
+                split = split_length(self.n_point, self.n_block)
+            splits = [split] * self.n_channel
+        else:
+            rf = torch.concat([
+                self._anchor_feat_v.detach(), 
+                self._offset_v.detach().flatten(-2).contiguous(), 
+                self._opacity_v.detach().contiguous(), 
+                self._scaling_v.detach(), 
+                self._rotation_v.detach()], -1)
+
+            C = rf[self.reorder]
+            iW1 = self.res['iW1']
+            iW2 = self.res['iW2']
+            iLeft_idx = self.res['iLeft_idx']
+            iRight_idx = self.res['iRight_idx']
+            
+            for d in range(self.depth * 3):
+                w1 = iW1[d]
+                w2 = iW2[d]
+                left_idx = iLeft_idx[d]
+                right_idx = iRight_idx[d]
+                C[left_idx], C[right_idx] = transform_batched_torch(w1, 
+                                                    w2, 
+                                                    C[left_idx], 
+                                                    C[right_idx])
+
+            split_0 = dp_split(C[1:, :32], self.qas[:32*self.n_block], self.n_block, C.shape[0]-1, self.unit_length)
+            # split_1 = dp_split(C[1:, 32:], self.qas[32*self.n_block:], self.n_block, C.shape[0]-1)
+            # print("Finished_2")
+            # split = [split_0] * 32 + [split_1] * 41
+            splits = [split_0] * self.n_channel
+        self.dp_split = torch.tensor(splits, dtype=int).cuda()
+        self.bqa = BatchQuant(self.n_channel, self.n_block, qbits, self.dp_split).cuda()
+        # print('split init bqa', torch.sum(self.dp_split[0]))
+        # print('self.n_point', self.n_point)
+        # np.save('exp_data/qbits.npy', np.array(qbits))
+        # np.save('exp_data/dp_split.npy', self.dp_split.cpu().numpy())
+        high_bit_channels = []
+        low_bit_channels = []
+        for i in range(self.n_channel):
+            qbit = qbits[i]
+            if qbit > 8:
+                high_bit_channels.append(i)
+            else:
+                low_bit_channels.append(i)
+        self.high_bit_channels = high_bit_channels
+        self.low_bit_channels = low_bit_channels
+    
+    def update_bqa(self, qbits = None, splits = None):
+        self.bqa.refresh(qbits, splits)
+        self.bqa = self.bqa.cuda()
+        
     def init_qas(self, n_block, qbits):
-        assert self.feature_channels != -1
+        assert self.n_channel != -1
         self.n_block = n_block
-        # n_qs = self.feature_channels * n_block
+        # n_qs = self.n_channel * n_block
         self.qas = nn.ModuleList([])
         # for i in range(n_qs): 
         #     self.qas.append(VanillaQuan(bit=8).cuda())
         high_bit_channels = []
         low_bit_channels = []
-        for i in range(self.feature_channels):
+        for i in range(self.n_channel):
             qbit = qbits[i]
             if qbit > 8:
                 high_bit_channels.append(i)
@@ -778,7 +869,8 @@ class GaussianModel:
             features,
             imp,
             depth=self.depth,
-            oct_merge=merge_type)
+            oct_merge=merge_type,
+            use_pcc=self.use_pcc)
 
         # V, features = sorted_voxels(V, features)
         
@@ -808,9 +900,55 @@ class GaussianModel:
         self._rotation = nn.Parameter(torch.tensor(features[:, base:base+4], dtype=torch.float, device="cuda").requires_grad_(True))
         base += 4
         print('base, feature size', base)
-        self.feature_channels = base
+        self.n_channel = base
 
-
+    def octree_offline(self, imp: torch.Tensor, merge_type: str):
+        features = torch.concat([
+            self._anchor_feat.detach(), 
+            self._offset.detach().flatten(-2).contiguous(), 
+            self._opacity.detach().contiguous(), 
+            self._scaling.detach(), 
+            self._rotation.detach()], -1)
+        
+        self.depth = int(np.round(np.log2(1/self.voxel_size)) + 2)
+        
+        _anchor_v, features_voxel, oct, paramarr, V, octree_imp,  _, _ = create_octree_train(
+            self._anchor, 
+            features,
+            imp.detach(),
+            pdepht=self.depth,
+            oct_merge=merge_type)
+        self.octree_imp = octree_imp
+        self.oct_param = paramarr
+        
+        # morton sort
+        w, val, reorder = copyAsort(V)
+        self.reorder = reorder
+        _anchor_v = _anchor_v[reorder]
+        self.V = V[reorder]
+        features_voxel = features_voxel[reorder]
+        
+        self.res = haar3D_param(self.depth, w, val)
+        self.res_inv = inv_haar3D_param(V, self.depth)
+        
+        self._anchor = nn.Parameter(
+            _anchor_v.float().cuda().requires_grad_(True)
+        )
+        base = 0
+        self._anchor_feat = nn.Parameter(features_voxel[:, base:base + self.feat_dim].float().cuda().contiguous().requires_grad_(True))
+        base += self.feat_dim
+        self._offset = nn.Parameter(features_voxel[:, base:base + self.n_offsets*3].reshape([-1, self.n_offsets, 3]).float().cuda().contiguous().requires_grad_(True))
+        base += self.n_offsets*3
+        self._opacity = nn.Parameter(features_voxel[:, base:base + 1].float().cuda().requires_grad_(True))
+        base += 1
+        self._scaling = nn.Parameter(features_voxel[:, base:base+6].float().cuda().requires_grad_(True))
+        base += 6
+        self._rotation = nn.Parameter(features_voxel[:, base:base+4].float().cuda().requires_grad_(True))
+        base += 4
+        print('base, feature size', base)
+        self.n_channel = base
+        self.n_point = _anchor_v.shape[0]
+        
     def octree_init_train(self, raht=False):
         features = torch.concat([
             self._anchor_feat.detach(), 
@@ -834,10 +972,7 @@ class GaussianModel:
         self._rotation = nn.Parameter(torch.tensor(features[:, base:base+4], dtype=torch.float, device="cuda").requires_grad_(True))
         base += 4
         print('base, feature size', base)
-        self.feature_channels = base
-
-
-    
+        self.n_channel = base
 
     def octree_train(self, imp, merge_type, raht=False):
 
@@ -850,7 +985,7 @@ class GaussianModel:
         
         self.depth = int(np.round(np.log2(1/self.voxel_size)) + 2)
         # TODO: move to TorchSparse Voxelization.
-        
+        # self.logger.info("octree_train")
         self._anchor_v, features_voxel, oct, paramarr, V, octree_imp,  _, _ = create_octree_train(
             self._anchor, 
             features,
@@ -881,33 +1016,79 @@ class GaussianModel:
         base += 6
         self._rotation_v = features_voxel[:, base:base+4]
         base += 4
-        self.feature_channels = base
+        self.n_channel = base
+        self.n_point = self._anchor_feat_v.shape[0]
 
+    def octree_simulation(self, imp, merge_type):
+        features = torch.concat([
+            self._anchor_feat, 
+            self._offset.flatten(-2).contiguous(), 
+            self._opacity.contiguous(), 
+            self._scaling, 
+            self._rotation], -1)
+
+        dxyz, features_voxel, oct, paramarr, V, octree_imp,  _, _ = create_octree_train(
+            self._anchor, 
+            features,
+            imp,
+            pdepht=self.depth,
+            oct_merge=merge_type)
+
+        w, val, reorder = copyAsort(V)
+        self.reorder = reorder
+        dxyz = dxyz[reorder]
+        self.V = V[reorder]
+        features_voxel = features_voxel[reorder]
         
+        self.res = haar3D_param(self.depth, w, val)
+        self.res_inv = inv_haar3D_param(V, self.depth)
+        self.n_point = dxyz.shape[0]
+        return dxyz, features_voxel
         
-    def apply_raht_quant(self,training=False):
+    def get_render_attributes(self):
+        if self.enable_octree_training and self.training:
+            dxyz, rf = self.octree_simulation()
+            return dxyz, rf
+        else:
+            rf = torch.concat([
+                self._anchor_feat, #32
+                self._offset.flatten(-2).contiguous(), # 30
+                self._opacity.contiguous(), #1
+                self._scaling, #6
+                self._rotation
+            ], -1) 
+            return self._anchor, rf
+    
+    
+    def apply_raht_quant(self, training=False):
         # anchor_feat torch.Size([868693, 32]) [20/08 22:10:57]
         # _offset torch.Size([868693, 10, 3]) [20/08 22:10:57]
         # _opacity torch.Size([868693, 1]) [20/08 22:10:57]
         # _scaling torch.Size([868693, 6]) [20/08 22:10:57]
         # _rotation torch.Size([868693, 4]) [20/08 22:10:57] not quant, ok
-        if training:
-            rf = torch.concat([
-            self._anchor_feat_v, #32
-            self._offset_v.flatten(-2).contiguous(), # 30
-            self._opacity_v.contiguous(), #1
-            self._scaling_v, #6
-            self._rotation_v], -1) #4
-        else:
-            rf = torch.concat([
-            self._anchor_feat.detach(), #32
-            self._offset.detach().flatten(-2).contiguous(), # 30
-            self._opacity.detach().contiguous(), #1
-            self._scaling.detach(), #6
-            self._rotation.detach()], -1) #4
+        # if training:
+        #     rf = torch.concat([
+        #         self._anchor_feat_v, #32
+        #         self._offset_v.flatten(-2).contiguous(), # 30
+        #         self._opacity_v.contiguous(), #1
+        #         self._scaling_v, #6
+        #         self._rotation_v
+        #     ], -1) #4
+        # else:
+        #     rf = torch.concat([
+        #         self._anchor_feat.detach(), #32
+        #         self._offset.detach().flatten(-2).contiguous(), # 30
+        #         self._opacity.detach().contiguous(), #1
+        #         self._scaling.detach(), #6
+        #         self._rotation.detach()
+        #     ], -1) #4
 
+        xyz, rf = self.get_render_attributes()
+            
+        # print('self.reorder', self.reorder)
+        # np.save('exp_data/reorder.npy', self.reorder)
 
-        # t = time.time()
+        # bg = time.time()
         C = rf[self.reorder]
         iW1 = self.res['iW1']
         iW2 = self.res['iW2']
@@ -924,33 +1105,48 @@ class GaussianModel:
                                                   C[left_idx], 
                                                   C[right_idx])
 
-        # print('forward', time.time()-t, 's')
+        # self.logger.info('raht forward {} s'.format(time.time()-bg))
         # t = time.time()
         
         # np.save('bef_quant.npy', C.detach().cpu().numpy())
         # np.savetxt('bef_quant.csv', C.detach().cpu().numpy(), delimiter=',')
 
-        quantC = torch.zeros_like(C)
-        quantC[0] = C[0]
-        qa_cnt = 0
-        lc1 = C.shape[0] - 1
-        # split_ac = split_length(lc1, self.n_block)
-        split_ac = self.dp_split
-        assert lc1==sum(split_ac[0]), "split length is error"
-        scale = torch.zeros(lc1,quantC.shape[1]).to('cuda')
-        zero_point = torch.zeros_like(scale)
-        thd_neg = torch.zeros_like(scale)
-        thd_po = torch.zeros_like(scale)
-        for i in range(C.shape[-1]):    
-            scale[:, i], zero_point[:, i], thd_neg[:, i], thd_po[:, i] = seg_quant(C[1:, i], split_ac[i], self.qas[qa_cnt : qa_cnt + self.n_block], need_all=True)
-            qa_cnt += self.n_block
-        quantC[1:] = Quant_all.apply(C[1:], scale, zero_point, thd_neg, thd_po)
         
+        # qa_cnt = 0
+        # lc1 = C.shape[0] - 1
+        # split_ac = split_length(lc1, self.n_block)
+        # split_ac = self.dp_split
+        # assert lc1==sum(self.dp_split[0]), "split length is error"
+        # scale = torch.zeros(lc1,quantC.shape[1]).to('cuda')
+        # zero_point = torch.zeros_like(scale)
+        # thd_neg = torch.zeros_like(scale)
+        # thd_po = torch.zeros_like(scale)
+        
+        bg = time.time()
+        # for i in range(C.shape[-1]):    
+        #     scale[:, i], zero_point[:, i], thd_neg[:, i], thd_po[:, i] = seg_quant(C[1:, i], split_ac[i], self.qas[qa_cnt : qa_cnt + self.n_block], need_all=True)
+        # qa_cnt += self.n_block * C.shape[-1]
+        # # self.logger.info('seg quant time {} s'.format(time.time()-bg))
+        # bg = time.time()
+        # quantC[1:] = Quant_all.apply(C[1:], scale, zero_point, thd_neg, thd_po)
+        
+        # np.save('exp_data/C.npy', C.detach().cpu().numpy())
+        # print('C.get_device()', C.get_device())
+        # print('self.bqa.get_device()', self.bqa.get_device())
+        # quantC = torch.zeros_like(C)
+        # quantC[0] = C[0]
+        # quantC[1:] = self.bqa(C[1:])
+        out = self.bqa(C[1:])
+        quantC = torch.concat([C[0].reshape(1, -1), out], dim = 0)
+        torch.cuda.synchronize()
+        
+        # self.logger.info('quant all time {} s'.format(time.time()-bg))
         # np.save('after_quant.npy', quantC.detach().cpu().numpy())
-
+        # quantC = torch.concat([C[0].reshape(1, -1), out], dim = 0)
         # print('quant', time.time()-t, 's')
         # t = time.time()
         
+        # bg = time.time()
         res_inv = self.res_inv
         pos = res_inv['pos']
         iW1 = res_inv['iW1']
@@ -968,7 +1164,9 @@ class GaussianModel:
         CT_yuv_q_temp = quantC[pos.astype(int)]
         drf = torch.zeros(quantC.shape).cuda()
         OC = torch.zeros(quantC.shape).cuda()
+        # self.logger.info('init deraht time {} s'.format(time.time()-bg))
         
+        bg = time.time()
         for i in range(self.depth*3):
             w1 = iW1[i]
             w2 = iW2[i]
@@ -988,37 +1186,42 @@ class GaussianModel:
             CT_yuv_q_temp[:S] = OC[:S]
 
         drf[self.reorder] = OC
-        ddrf = torch.mean(torch.square(drf.detach()-rf.detach()), dim=0)
+        # self.logger.info('deraht loop time {} s'.format(time.time()-bg))
+        # ddrf = torch.mean(torch.square(drf.detach()-rf.detach()), dim=0)
         # print('backward', time.time()-t, 's')
         
         # np.save('ddrf.npy', ddrf.cpu().numpy())
         # np.save('drf.npy', drf.detach().cpu().numpy())
-        return drf
+        
+        return xyz, drf
 
     def apply_quant(self):
-        rf = torch.concat([
-            self._anchor_feat.detach(), 
-            self._offset.detach().flatten(-2).contiguous(), 
-            self._opacity.detach().contiguous(), 
-            self._scaling.detach(), 
-            self._rotation.detach()], -1)
-
-        qa_cnt = 0
-        lc1 = rf.shape[0]
-        drf = torch.zeros_like(rf)
-        # split_ac = split_length(lc1, self.n_block)
-        split_ac = self.dp_split
-        assert lc1==sum(split_ac[0]), "split length is error"
-        for i in range(rf.shape[-1]):
-            drf[:, i] = seg_quant(rf[:, i], split_ac[i], self.qas[qa_cnt : qa_cnt + self.n_block])
-            qa_cnt += self.n_block
+        # rf = torch.concat([
+        #     self._anchor_feat.detach(), 
+        #     self._offset.detach().flatten(-2).contiguous(), 
+        #     self._opacity.detach().contiguous(), 
+        #     self._scaling.detach(), 
+        #     self._rotation.detach()], -1)
+        xyz, rf = self.get_render_attributes()
         
-        return drf
+        drf = self.bqa(rf)
+        
+        # lc1 = rf.shape[0]
+        # drf = torch.zeros_like(rf)
+        # split_ac = split_length(lc1, self.n_block)
+        # split_ac = self.dp_split
+        # assert lc1==sum(split_ac[0]), "split length is error"
+        
+        
+        # for i in range(rf.shape[-1]):
+        #     drf[:, i] = seg_quant(rf[:, i], split_ac[i], self.qas[qa_cnt : qa_cnt + self.n_block])
+        #     qa_cnt += self.n_block
+        
+        return self._anchor, drf
 
-    def set_dp_split(self, dp=True, unit_length=100, n_block=None):
-        self.n_block = n_block
+    def set_dp_split(self, dp=True):
         if dp==False:
-            self.dp_split = [split_length(self._anchor_v.shape[0]-1, self.n_block)]*73
+            self.dp_split = torch.tensor([split_length(self.n_channel-1, self.n_block)]*73, dtype=int).cuda()
             return
         rf = torch.concat([
             self._anchor_feat_v.detach(), 
@@ -1043,20 +1246,22 @@ class GaussianModel:
                                                   C[left_idx], 
                                                   C[right_idx])
 
-        split_0 = dp_split(C[1:, :32], self.qas[:32*self.n_block], self.n_block, C.shape[0]-1, unit_length)
-        print("Finished_1")
+        split_0 = dp_split(C[1:, :32], self.qas[:32*self.n_block], self.n_block, C.shape[0]-1, self.unit_length)
+        # print("Finished_1")
         # split_1 = dp_split(C[1:, 32:], self.qas[32*self.n_block:], self.n_block, C.shape[0]-1)
-        print("Finished_2")
+        # print("Finished_2")
         # split = [split_0] * 32 + [split_1] * 41
-        split = [split_0] * 73
-        self.dp_split = split
+        split = [split_0] * self.n_channel
+        # self.logger('dp split shape {} {}'.format(len(split), len(split_0)))
+        self.dp_split = torch.tensor(split, dtype=int).cuda()
+        self.bqa.update_split(self.dp_split)
 
     def change_dp_split(self, dp=True, unit_length=100):
         if self._anchor_v.shape[0]-1 == sum(self.dp_split[0]):
             # print("anchor",self._anchor_v.shape[0]-1,"dp_split",sum(self.dp_split[0]))
             return
         if dp==False:
-            self.dp_split = [split_length(self._anchor_v.shape[0]-1, self.n_block)]*73
+            self.dp_split = torch.tensor([split_length(self._anchor_v.shape[0]-1, self.n_block)]*73, dtype=int).cuda()
             return
         rf = torch.concat([
             self._anchor_feat_v.detach(), 
@@ -1083,7 +1288,8 @@ class GaussianModel:
 
         split_0 = dp_split(C[1:, :32], self.qas[:32*self.n_block], self.n_block, C.shape[0]-1, unit_length)
         split = [split_0] * 73
-        self.dp_split = split
+        self.dp_split = torch.tensor(split, dtype=int).cuda()
+        self.bqa.update_split(split)
 
     
     def load_ply_sparse_gaussian(self, path):
@@ -1233,7 +1439,7 @@ class GaussianModel:
             
         return optimizable_tensors
 
-    def prune_anchor(self,mask):
+    def prune_anchor(self, mask):
         valid_points_mask = ~mask
 
         optimizable_tensors = self._prune_anchor_optimizer(valid_points_mask)
@@ -1245,6 +1451,15 @@ class GaussianModel:
         self._scaling = optimizable_tensors["scaling"]
         self._rotation = optimizable_tensors["rotation"]
 
+    def prune_anchor_no_grad(self, mask):
+        valid_points_mask = ~mask
+        
+        self._anchor = self._anchor[valid_points_mask]
+        self._offset = self._offset[valid_points_mask]
+        self._anchor_feat = self._anchor_feat[valid_points_mask]
+        self._opacity = self._opacity[valid_points_mask]
+        self._scaling = self._scaling[valid_points_mask]
+        self._rotation = self._rotation[valid_points_mask]
     
     def anchor_growing(self, grads, threshold, offset_mask):
         ## 
@@ -1537,26 +1752,147 @@ class GaussianModel:
                                                   C[right_idx])
 
 
-        quantC = torch.zeros_like(C)
-        quantC[0] = C[0]
-        qa_cnt = 0
-        lc1 = C.shape[0] - 1
-        split_ac = self.dp_split
-        assert lc1==sum(split_ac[0]), "split length is error"
+        # quantC = torch.zeros_like(C)
+        # quantC[0] = C[0]
+        # qa_cnt = 0
+        # lc1 = C.shape[0] - 1
+        # split_ac = self.dp_split
+        # print('lc1', lc1)
+        # print('sum(split_ac[0])', sum(split_ac[0]))
+        # assert lc1==sum(split_ac[0]), "split length is error"
 
-        A = torch.zeros(C.shape[-1], 16).cuda()
+        self.n_channel = C.shape[-1]
 
+        # np.save('exp_data/C.npy', C.detach().cpu().numpy())
+        # np.save('exp_data/dp_split.npy', self.dp_split.detach().cpu().numpy())
+        # print('self.dp_split', self.dp_split)
+        # print('self.dp_split', self.dp_split.shape)
+        # print('self.dp_split[i].reshape(1, -1)', self.dp_split[1].reshape(1, -1).shape)
         
-        for i in range(C.shape[-1]):   
-            for j in range(1,17): 
-                qas_temp = nn.ModuleList([])
-                for k in range(self.n_block):
-                    qas_temp.append(VanillaQuan(bit=j).cuda())    
-                quant = seg_quant(C[1:, i], split_ac[i], qas_temp, need_all=False)
-                A[i,j-1] = torch.sum(torch.square(quant.detach()-C[1:, i].detach()))
+        npc = C.detach().cpu().numpy()
+        A = torch.zeros(self.n_channel, 16).cuda()
+        for i in range(self.n_channel):
+            for j in range(1, 17):
+                channel_bqa = BatchQuant(
+                    channel_num=1, 
+                    block_num=self.n_block, 
+                    qbits=[int(j)], 
+                    splits=self.dp_split[i].reshape(1, -1)
+                ).cuda()
+                # print('C', torch.sum(C[1:, i:i+1]))
+                c = torch.tensor(npc[1:, i:i+1]).cuda()
+                assert c.shape[-1] == 1
+                qdq_tensor = channel_bqa(c)
+                torch.cuda.synchronize()
+                # print('qdq_tensor', torch.sum(qdq_tensor))
+                A[i,j-1] = torch.sum(torch.square(qdq_tensor.detach()-c))
+        print('A', A)
+        # A = torch.zeros(self.num_channel, 16).cuda()
+        # for i in range(self.num_channel): 
+        #     for j in range(1,17): 
+        #         qas_temp = nn.ModuleList([])
+        #         for k in range(self.n_block):
+        #             qas_temp.append(VanillaQuan(bit=j).cuda())    
+        #         quant = seg_quant(C[1:, i], split_ac[i], qas_temp, need_all=False)
+        #         A[i,j-1] = torch.sum(torch.square(quant.detach()-C[1:, i].detach()))
         
         A_flat = A.flatten().cpu().tolist()  # 将展平后的张量转为 Python 列表
 
         return A_flat
 
         
+    def get_fine_grained_ddrf(self):
+
+        rf = torch.concat([
+            self._anchor_feat, #32
+            self._offset.flatten(-2).contiguous(), # 30
+            self._opacity.contiguous(), #1
+            self._scaling, #6
+            self._rotation], -1) #4
+
+
+        # t = time.time()
+        C = rf[self.reorder]
+        iW1 = self.res['iW1']
+        iW2 = self.res['iW2']
+        iLeft_idx = self.res['iLeft_idx']
+        iRight_idx = self.res['iRight_idx']
+        
+        for d in range(self.depth * 3):
+            w1 = iW1[d]
+            w2 = iW2[d]
+            left_idx = iLeft_idx[d]
+            right_idx = iRight_idx[d]
+            C[left_idx], C[right_idx] = transform_batched_torch(w1, 
+                                                  w2, 
+                                                  C[left_idx], 
+                                                  C[right_idx])
+
+
+        # quantC = torch.zeros_like(C)
+        # quantC[0] = C[0]
+        # qa_cnt = 0
+        # lc1 = C.shape[0] - 1
+        # split_ac = self.dp_split
+        # print('lc1', lc1)
+        # print('sum(split_ac[0])', sum(split_ac[0]))
+        # assert lc1==sum(split_ac[0]), "split length is error"
+
+        self.n_channel = C.shape[-1]
+
+        # np.save('exp_data/C.npy', C.detach().cpu().numpy())
+        # np.save('exp_data/dp_split.npy', self.dp_split.detach().cpu().numpy())
+        # print('self.dp_split', self.dp_split)
+        # print('self.dp_split', self.dp_split.shape)
+        # print('self.dp_split[i].reshape(1, -1)', self.dp_split[1].reshape(1, -1).shape)
+        
+        npc = C[1:].clone().detach()
+        # A = torch.zeros(self.n_channel, self.n_block, 16).cuda()
+        A = []
+        splits = torch.tensor([split_length(self.n_point - 1, self.n_block)] * self.n_channel, device="cuda")
+        
+        assert splits.shape[0] == self.n_channel
+        
+        # [[int(j)] * self.n_channel]*self.n_block
+        with torch.no_grad():
+            for j in range(1, 17):
+                out = cal_diff_wrapper(
+                    channel_num = self.n_channel,
+                    block_num = self.n_block,
+                    inputs = npc,
+                    splits = splits,
+                    qbits = torch.ones([self.n_channel, self.n_block], device="cuda")*j,
+                )
+                A.append(out.clone())
+        A = torch.stack(A) # [16, C, B]
+        A = A.permute(1, 2, 0) # [C, B, 16]
+        print('A sum', torch.sum(A))
+
+        # for i in range(self.n_channel):
+        #     for j in range(1, 17):
+        #         channel_bqa = BatchQuant(
+        #             channel_num=1, 
+        #             block_num=self.n_block, 
+        #             qbits=[int(j)], 
+        #             splits=self.dp_split[i].reshape(1, -1)
+        #         ).cuda()
+        #         # print('C', torch.sum(C[1:, i:i+1]))
+        #         c = torch.tensor(npc[1:, i:i+1]).cuda()
+        #         assert c.shape[-1] == 1
+        #         qdq_tensor = channel_bqa(c)
+        #         torch.cuda.synchronize()
+        #         # print('qdq_tensor', torch.sum(qdq_tensor))
+        #         A[i,j-1] = torch.sum(torch.square(qdq_tensor.detach()-c))
+        # print('A', A)
+        # A = torch.zeros(self.num_channel, 16).cuda()
+        # for i in range(self.num_channel): 
+        #     for j in range(1,17): 
+        #         qas_temp = nn.ModuleList([])
+        #         for k in range(self.n_block):
+        #             qas_temp.append(VanillaQuan(bit=j).cuda())    
+        #         quant = seg_quant(C[1:, i], split_ac[i], qas_temp, need_all=False)
+        #         A[i,j-1] = torch.sum(torch.square(quant.detach()-C[1:, i].detach()))
+        
+        A_flat = A.flatten().cpu().tolist()  # 将展平后的张量转为 Python 列表
+
+        return A_flat

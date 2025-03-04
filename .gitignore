@@ -13,3 +13,4 @@ runs
 check_metrics.py
 
 exp_data
+submodules/seg-quant/log

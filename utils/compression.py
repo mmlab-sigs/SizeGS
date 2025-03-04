@@ -82,7 +82,7 @@ def d1halfing_fast_torch(pmin, pmax, pdepht):
     return torch.linspace(pmin, pmax, steps=2**int(pdepht) + 1).to('cuda')
 
 
-def create_octree_train(ppoints, pfeatures, imp, pdepht, oct_merge, use_pcc=False):
+def create_octree_train(ppoints, pfeatures, imp, pdepht, oct_merge):
     ori_points_num = ppoints.shape[0]
     # t = time.time()
     torch.cuda.synchronize()  # 在可能出错的CUDA操作之前调用
@@ -143,10 +143,10 @@ def create_octree_train(ppoints, pfeatures, imp, pdepht, oct_merge, use_pcc=Fals
     # 堆叠 NumPy 数组
     V = np.vstack([occodex_np, occodey_np, occodez_np]).T
     
-    if use_pcc:
-        V, features, indices_sorted = sorted_voxels(V, features)
+    # if use_pcc:
+    #     V, features, indices_sorted = sorted_voxels(V, features)
         
-    d_xyz = d_xyz[indices_sorted]
+    # d_xyz = d_xyz[indices_sorted]
     
     # V = np.array([occodex.cpu(),occodey.cpu(),occodez.cpu()], dtype=int).T
     # V = torch.stack([occodex.cpu(), occodey.cpu(), occodez.cpu()], dim=1).numpy()
@@ -156,8 +156,6 @@ def create_octree_train(ppoints, pfeatures, imp, pdepht, oct_merge, use_pcc=Fals
     # t = time.time()
     #!!!!!!!!!!!
     return d_xyz, features, ki, paramarr, V, octree_imp, ori_points_num, final_points_num
-
-
 
 def octreecodes(ppoints, pdepht, merge_type='mean',imps=None):
     minx=np.amin(ppoints[:,0])
@@ -210,7 +208,7 @@ def octreecodes(ppoints, pdepht, merge_type='mean',imps=None):
     # print('final_feature.shape', final_feature.shape)
     return (ki,minx,maxx,miny,maxy,minz,maxz, final_feature)
 
-def create_octree(ppoints, pfeatures, imp, depth, oct_merge):
+def create_octree(ppoints, pfeatures, imp, depth, oct_merge, use_pcc):
     ori_points_num = ppoints.shape[0]
     ppoints = np.concatenate([ppoints, pfeatures], -1)
     occ=octreecodes(ppoints, depth, oct_merge, imp)
@@ -222,6 +220,8 @@ def create_octree(ppoints, pfeatures, imp, depth, oct_merge):
     features = occ[-1][:, 3:]
     paramarr=np.asarray([occ[1],occ[2],occ[3],occ[4],occ[5],occ[6]]) # boundary
     # print('oct[0]', type(oct[0]))
+    if use_pcc:
+        V, features, indices_sorted = sorted_voxels(voxel_xyz, features)
     return voxel_xyz, features, occ[0], paramarr, ori_points_num, final_points_num
 
 def decode_oct(paramarr, oct, depth):
@@ -281,7 +281,7 @@ def sorted_voxels(voxelized_means: np.ndarray, other_params = None) -> Union[np.
     return voxelized_means, other_params, indices_sorted
 
 
-def gpcc_encode(ply_path: str, bin_path: str, encoder_path='/home/szxie/storage/mpeg-pcc-tmc13/build/tmc3/tmc3') -> None:
+def gpcc_encode(ply_path: str, bin_path: str, encoder_path='~/mpeg-pcc-tmc13/build/tmc3/tmc3') -> None:
     """
     Compress geometry point cloud by GPCC codec.
     """
@@ -295,7 +295,7 @@ def gpcc_encode(ply_path: str, bin_path: str, encoder_path='/home/szxie/storage/
     assert exit_code == 0, f'GPCC encoder failed with exit code {exit_code}.'
 
 
-def gpcc_decode(bin_path: str, recon_path: str, decoder_path='/home/szxie/storage/mpeg-pcc-tmc13/build/tmc3/tmc3') -> None:
+def gpcc_decode(bin_path: str, recon_path: str, decoder_path='~/mpeg-pcc-tmc13/build/tmc3/tmc3') -> None:
     """
     Decompress geometry point cloud by GPCC codec.
     """

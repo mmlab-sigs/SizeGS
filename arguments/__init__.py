@@ -99,6 +99,7 @@ class PipelineParams(ParamGroup):
         self.compute_cov3D_python = False
         self.debug = False
         self.n_block = 20
+        self.enable_octree_training = False
         self.test_zero = True
         super().__init__(parser, "Pipeline Parameters")
 

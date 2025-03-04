@@ -45,6 +45,11 @@ from utils.image_utils import psnr
 from argparse import ArgumentParser, Namespace
 from arguments import ModelParams, PipelineParams, OptimizationParams
 from torch.utils.tensorboard import SummaryWriter
+import BDD.ILP_instance_py as ilp_instance
+from BDD.bdd_solver_py import bdd_solver as bdd_solver
+from BDD.bdd_solver_py import bdd_solver_options as bdd_solver_options
+import numpy as np
+
 
 # torch.set_num_threads(32)
 lpips_fn = lpips.LPIPS(net='vgg').to('cuda')
@@ -135,6 +140,57 @@ def get_percent(target_size, qbit, n_block, anchor_size, offset):
     n = int((target_size - 50*1024 - 4*n_block - offset*1024*1024)*8 - 73*32 - 73*n_block*32*2 - 2*32 - n_block*32 + qbit)/(qbit+64)
     return (anchor_size - n)/anchor_size
 
+def newSize(n, qbits, n_block, splits, offset):
+    remain = (73*32 + n*64 + 73*n_block*32*2 + 2*32 + n_block*32)/8 + 50*1024 + 4*n_block +offset*1024*1024
+    # Todo: rewrite the new Size function.
+    # return qbits < ?
+    
+def create_ilp_problem(L, n_bit, n_channel, n_block):
+    n_variable = n_bit * n_channel * n_block
+    objective = {}
+    for i in range(n_variable):
+        objective[f"x{i}"] = L[i] 
+        
+    constraints = []
+    
+    n_cons = 1
+    for i in range(n_channel * n_block):
+        coni = [f'C{i}']
+        coni_dict = {}
+        for j in range(16):
+            coni_dict[f"x{i*16+j}"] = 1.0
+        coni.append(coni_dict)
+        coni.append('=')
+        coni.append(1.0)
+    
+    
+    objective = {'x1': 2.0, 'x2': 1.0, 'x3': -1.0, 'x4': 1.0, 'x5': -2.0, 'x6': -5.0}
+    constraints = [
+        ['C1', {'x1': 1.0, 'x2': 1.0, 'x3': 1.0}, '=', 1.0],
+        ['C2', {'x3': 1.0, 'x4': 1.0, 'x5': 1.0}, '<', 1.0],
+        ['C3', {'x4': 1.0, 'x5': 1.0, 'x6': 1.0}, '>', 1.0]
+    ]
+    ilp = ilp_instance.ILP_instance()
+    for var_name, coeff in objective.items():
+        ilp.add_new_variable_with_obj(var_name, coeff)
+
+    for con in constraints:
+        con_name = con[0]
+        con_vars = list(con[1].keys())
+        con_coeffs = list(con[1].values())
+        con_coeffs = [int(c) for c in con_coeffs] # Only integer coefficients are supported.
+        con_sense = con[2]
+        rhs_value = int(con[3]) # Only integer right hand side value is supported.
+        if con_sense == '=':
+            ineq_type = ilp_instance.equal
+        elif con_sense == '<':
+            ineq_type = ilp_instance.smaller_equal
+        else:
+            assert(con_sense == '>')
+            ineq_type = ilp_instance.greater_equal
+        ilp.add_new_constraint(con_name, con_vars, con_coeffs, rhs_value, ineq_type)
+    return ilp
+
 
 
 
@@ -150,168 +206,193 @@ def training(dataset, opt, pipe, dataset_name, testing_iterations, saving_iterat
     best_qbit = 8
     offset = 0
 
-
     t = time.time()
 
-    for target_qbit in range(8,10):
-        gaussians = GaussianModel(dataset.feat_dim, dataset.n_offsets, dataset.voxel_size, dataset.update_depth, dataset.update_init_factor, dataset.update_hierachy_factor, dataset.use_feat_bank, 
-                                dataset.appearance_dim, dataset.ratio, dataset.add_opacity_dist, dataset.add_cov_dist, dataset.add_color_dist, dataset.raht, dataset.use_pcc)
-        scene = Scene(dataset, gaussians, load_iteration=load_iteration, shuffle=False)
+    imp = None
+    # for target_qbit in range(8,10):
+    #     gaussians = GaussianModel(
+    #         dataset.feat_dim, dataset.n_offsets, 
+    #         dataset.voxel_size, dataset.update_depth, 
+    #         dataset.update_init_factor, dataset.update_hierachy_factor, 
+    #         dataset.use_feat_bank, dataset.appearance_dim, 
+    #         dataset.ratio, dataset.add_opacity_dist, 
+    #         dataset.add_cov_dist, dataset.add_color_dist, 
+    #         dataset.raht, pipe.n_block, dataset.unit_length,
+    #         dataset.use_pcc, logger=logger)
+    #     scene = Scene(dataset, gaussians, load_iteration=load_iteration, shuffle=False)
 
-        all_anchor_size = int(gaussians._anchor.shape[0])
-        gaussians.training_setup(opt)
+    #     all_anchor_size = int(gaussians._anchor.shape[0])
+    #     # gaussians.training_setup(opt)
         
-        with torch.no_grad():
-            gaussians.eval()
-            imp = cal_imp(gaussians, scene.getTrainCameras(), pipe, background)
-            purne_percent = get_percent(dataset.target_size*1024*1024, target_qbit*73, pipe.n_block, all_anchor_size, 0)
-            print(purne_percent)
+    #     with torch.no_grad():
+    #         if imp is None:
+    #             gaussians.eval()
+    #             imp = cal_imp(gaussians, scene.getTrainCameras(), pipe, background)
+    #             print(imp.shape)
+    #         imp = imp.detach()
+    #         purne_percent = get_percent(dataset.target_size*1024*1024, best_qbit*73, pipe.n_block, all_anchor_size, offset)
+    #         print(purne_percent)
+    #         pmask = prune_mask(purne_percent, imp)
+    #         remain_imp = imp[torch.logical_not(pmask)]
+    #         gaussians.prune_anchor_no_grad(pmask)
         
-            pmask = prune_mask(purne_percent, imp)
-            imp = imp[torch.logical_not(pmask)]
-            gaussians.prune_anchor(pmask)
+    #     gaussians.octree_init_train()
+    #     # gaussians.train()
+    #     torch.cuda.empty_cache()
         
-        gaussians.octree_init_train()
-        gaussians.train()
-        torch.cuda.empty_cache()
+    #     gaussians.training_setup(opt)
+    #     gaussians.octree_train(remain_imp, dataset.oct_merge, raht=dataset.raht)
+
+    #     # gaussians.init_qas(pipe.n_block, [target_qbit]*73)
+
+    #     # dp=False
+    #     # gaussians.set_dp_split(dp=dp, unit_length=dataset.unit_length, n_block = pipe.n_block)
         
-        gaussians.training_setup(opt)
-        gaussians.train()
-
-        gaussians.octree_train(imp, dataset.oct_merge, raht=dataset.raht)
-
-        gaussians.init_qas(pipe.n_block, [target_qbit]*73)
-
-        dp=False
-        gaussians.set_dp_split(dp=dp, unit_length=dataset.unit_length, n_block = pipe.n_block)
-
-        model_size_limit = dataset.target_size*1024*1024
-        N1 = 73
-
-        num_variable = N1 * 16
-
-        L = gaussians.get_ddrf()
-        assert len(L) == num_variable, "Length of L does not match number of variables."
-
-        variable = {}
-        for i in range(num_variable):
-            variable[f"x{i}"] = LpVariable(f"x{i}", 0, 1, cat=LpInteger)
-
-        prob = LpProblem("Model_Size", LpMinimize)
-
-        prob += Size(gaussians._anchor_v.shape[0], [variable[f"x{i}"] for i in range(num_variable)], pipe.n_block, 0) <= model_size_limit
-
-        for le in range(0, N1):
-            ri = le * 16 + 16
-            prob += sum([variable[f"x{i}"] for i in range(le * 16, ri)]) == 1
-
-        prob += sum([(variable[f"x{i}"]) * L[i] for i in range(num_variable)])
-
-        time_limit = 200
-
-        # 使用CBC求解器并设置时间限制
-        prob.solve(PULP_CBC_CMD(timeLimit=time_limit, msg=True))
-
-        solution = {}
-        for i in range(num_variable):
-            solution[f"x{i}"] = variable[f"x{i}"].varValue
-
-        qbits = [0]*73
-        for i in range(73):
-            for j in range(16):
-                if variable[f"x{i*16+j}"].varValue != 0:
-                    qbits[i] = j+1
-
-        gaussians.init_qas(pipe.n_block, qbits)
-
-        minimized_value = prob.objective.value()
-        print("Minimized objective value:", minimized_value)
-        drf = 0
-        for i in range(73):
-            drf += L[i*16+7]
-        print(drf)
-        drf_shape = minimized_value/gaussians._anchor.shape[0]
-        if drf_shape < min_drf_shape:
-            min_drf_shape = drf_shape
-            final_percent = purne_percent
-            final_qbits = qbits
-            best_qbit = target_qbit
+    #     gaussians.init_bqa([target_qbit]*73, dp=False)
         
-            bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
-            background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
-            viewpoint_stack = None
-            # Pick a random Camera
-            if not viewpoint_stack:
-                viewpoint_stack = scene.getTrainCameras().copy()
-            viewpoint_cam = viewpoint_stack.pop(randint(0, len(viewpoint_stack)-1))
+    #     gaussians.train()
 
-            voxel_visible_mask = prefilter_voxel(viewpoint_cam, gaussians, pipe,background, training=True)
-            retain_grad = False
-            render_pkg = ft_render(viewpoint_cam, gaussians, pipe, background, visible_mask=voxel_visible_mask, retain_grad=retain_grad)
+    #     model_size_limit = dataset.target_size*1024*1024
+    #     N1 = 73
 
-            offset = scene.save_compressed(0) - dataset.target_size
-            print("offset", offset)
+    #     num_variable = N1 * 16
 
+    #     L = gaussians.get_ddrf()
+    #     assert len(L) == num_variable, "Length of L does not match number of variables."
 
-    logger.info(final_qbits)
+    #     variable = {}
+    #     for i in range(num_variable):
+    #         variable[f"x{i}"] = LpVariable(f"x{i}", 0, 1, cat=LpInteger)
+
+    #     prob = LpProblem("Model_Size", LpMinimize)
+
+    #     prob += Size(gaussians._anchor_v.shape[0], [variable[f"x{i}"] for i in range(num_variable)], pipe.n_block, 0) <= model_size_limit
+
+    #     for le in range(0, N1):
+    #         ri = le * 16 + 16
+    #         prob += sum([variable[f"x{i}"] for i in range(le * 16, ri)]) == 1
+
+    #     prob += sum([(variable[f"x{i}"]) * L[i] for i in range(num_variable)])
+
+    #     time_limit = 200
+
+    #     # 使用CBC求解器并设置时间限制
+    #     prob.solve(PULP_CBC_CMD(timeLimit=time_limit, msg=True))
+
+    #     solution = {}
+    #     for i in range(num_variable):
+    #         solution[f"x{i}"] = variable[f"x{i}"].varValue
+
+    #     qbits = [0]*73
+    #     for i in range(73):
+    #         for j in range(16):
+    #             if variable[f"x{i*16+j}"].varValue != 0:
+    #                 qbits[i] = j+1
+
+    #     # gaussians.init_qas(pipe.n_block, qbits)
+        
+    #     gaussians.init_bqa([target_qbit]*73, dp=False)
+    #     gaussians.train()
+        
+    #     minimized_value = prob.objective.value()
+    #     print("Minimized objective value:", minimized_value)
+    #     drf = 0
+    #     for i in range(73):
+    #         drf += L[i*16+7]
+    #     print(drf)
+    #     drf_shape = minimized_value/gaussians._anchor.shape[0]
+    #     if drf_shape < min_drf_shape:
+    #         min_drf_shape = drf_shape
+    #         final_percent = purne_percent
+    #         final_qbits = qbits
+    #         best_qbit = target_qbit
+        
+    #         bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
+    #         background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
+    #         viewpoint_stack = None
+    #         # Pick a random Camera
+    #         if not viewpoint_stack:
+    #             viewpoint_stack = scene.getTrainCameras().copy()
+    #         viewpoint_cam = viewpoint_stack.pop(randint(0, len(viewpoint_stack)-1))
+
+    #         voxel_visible_mask = prefilter_voxel(viewpoint_cam, gaussians, pipe,background, training=True)
+    #         retain_grad = False
+    #         render_pkg = ft_render(viewpoint_cam, gaussians, pipe, background, visible_mask=voxel_visible_mask, retain_grad=retain_grad)
+
+    #         offset = scene.save_compressed(0) - dataset.target_size
+    #         print("offset", offset)
+
+    offset = 0 #debug only
+    # logger.info(final_qbits)
     
-    logger.info('probe time: {}'.format(time.time() - t))
-    #再次规划
+    # logger.info('probe time: {}'.format(time.time() - t))
+    # #再次规划
     
     bg = time.time()
-    gaussians = GaussianModel(dataset.feat_dim, dataset.n_offsets, dataset.voxel_size, dataset.update_depth, dataset.update_init_factor, dataset.update_hierachy_factor, dataset.use_feat_bank, 
-                            dataset.appearance_dim, dataset.ratio, dataset.add_opacity_dist, dataset.add_cov_dist, dataset.add_color_dist, dataset.raht, dataset.use_pcc)
+    gaussians = GaussianModel(
+        dataset.feat_dim, dataset.n_offsets, 
+        dataset.voxel_size, dataset.update_depth, 
+        dataset.update_init_factor, dataset.update_hierachy_factor, 
+        dataset.use_feat_bank, dataset.appearance_dim, 
+        dataset.ratio, dataset.add_opacity_dist, 
+        dataset.add_cov_dist, dataset.add_color_dist, 
+        dataset.raht, pipe.n_block, dataset.unit_length, 
+        dataset.use_pcc, logger)
+    
     scene = Scene(dataset, gaussians, load_iteration=load_iteration, shuffle=False)
     all_anchor_size = int(gaussians._anchor.shape[0])
-    gaussians.training_setup(opt)
     
     logger.info('load gaussian model time: {}'.format(time.time() - bg))
     
     
     bg = time.time()
     with torch.no_grad():
-        gaussians.eval()
-        imp = cal_imp(gaussians, scene.getTrainCameras(), pipe, background)
-        print(imp.shape)
-        purne_percent = get_percent(dataset.target_size*1024*1024, best_qbit*73, pipe.n_block, all_anchor_size, offset)
+        if imp is None:
+            gaussians.eval()
+            imp = cal_imp(gaussians, scene.getTrainCameras(), pipe, background)
+            print(imp.shape)
+        imp = imp.detach()
+        # purne_percent = get_percent(dataset.target_size*1024*1024, best_qbit*73, pipe.n_block, all_anchor_size, offset)
+        purne_percent = 0.6
         print(purne_percent)
-    
         pmask = prune_mask(purne_percent, imp)
-        imp = imp[torch.logical_not(pmask)]
-        gaussians.prune_anchor(pmask)
+        remain_imp = imp[torch.logical_not(pmask)]
+        gaussians.prune_anchor_no_grad(pmask)
     logger.info('cal imp: {}'.format(time.time() - bg))
     
-    bg = time.time()
-    gaussians.octree_init_train()
-    gaussians.train()
-    torch.cuda.empty_cache()
+    if not pipe.enable_octree_training:
+        gaussians.octree_offline(remain_imp.clone(), dataset.oct_merge)
+    # bg = time.time()
+    # gaussians.octree_init_train()
+    # # gaussians.train()
+    # # torch.cuda.empty_cache()
     
-    logger.info('octree init: {}'.format(time.time() - bg))
+    # logger.info('octree init: {}'.format(time.time() - bg))
     
-    bg = time.time()
-    gaussians.training_setup(opt)
-    gaussians.train()
+    # bg = time.time()
+    # gaussians.training_setup(opt)
 
-    gaussians.octree_train(imp, dataset.oct_merge, raht=dataset.raht)
-    logger.info('octree train init: {}'.format(time.time() - bg))
+    # gaussians.octree_train(remain_imp, dataset.oct_merge, raht=dataset.raht)
+    # logger.info('octree train init: {}'.format(time.time() - bg))
     
-    bg = time.time()
-    gaussians.init_qas(pipe.n_block, [best_qbit]*73)
-    logger.info('init qas: {}'.format(time.time() - bg))
+    # bg = time.time()
+    # # gaussians.init_qas(pipe.n_block, [best_qbit]*73)
+    # gaussians.init_bqa([best_qbit]*73, dp=False)
+    # logger.info('init qas and dp: {}'.format(time.time() - bg))
+    # gaussians.train()
+    # # bg = time.time()
+    # # dp=False
+    # # gaussians.set_dp_split(dp=dp, unit_length=dataset.unit_length, n_block = pipe.n_block)
+    # # logger.info('set_dp_split: {}'.format(time.time() - bg))
 
-    bg = time.time()
-    dp=False
-    gaussians.set_dp_split(dp=dp, unit_length=dataset.unit_length, n_block = pipe.n_block)
-    logger.info('set_dp_split: {}'.format(time.time() - bg))
-    
-    
-    bg = time.time()
+    # bg = time.time()
     model_size_limit = dataset.target_size*1024*1024
-    N1 = 73
+    # N1 = 73
 
-    num_variable = N1 * 16
+    n_group = gaussians.n_channel * gaussians.n_block
+    num_variable = gaussians.n_channel * gaussians.n_block * 16
 
-    L = gaussians.get_ddrf()
+    L = gaussians.get_fine_grained_ddrf()
     assert len(L) == num_variable, "Length of L does not match number of variables."
 
     variable = {}
@@ -320,11 +401,12 @@ def training(dataset, opt, pipe, dataset_name, testing_iterations, saving_iterat
 
     prob = LpProblem("Model_Size", LpMinimize)
 
-    prob += Size(gaussians._anchor_v.shape[0], [variable[f"x{i}"] for i in range(num_variable)], pipe.n_block, offset) <= model_size_limit
+    prob += Size(gaussians.n_point, [variable[f"x{i}"] for i in range(num_variable)], gaussians.n_block, offset) <= model_size_limit
 
-    for le in range(0, N1):
+    for le in range(0, n_group):
         ri = le * 16 + 16
         prob += sum([variable[f"x{i}"] for i in range(le * 16, ri)]) == 1
+    print('here')
     prob += sum([(variable[f"x{i}"]) * L[i] for i in range(num_variable)])
 
     time_limit = 200
@@ -336,47 +418,78 @@ def training(dataset, opt, pipe, dataset_name, testing_iterations, saving_iterat
     for i in range(num_variable):
         solution[f"x{i}"] = variable[f"x{i}"].varValue
 
-    qbits = [0]*73
-    for i in range(73):
-        for j in range(16):
-            if variable[f"x{i*16+j}"].varValue != 0:
-                qbits[i] = j+1
+    qbits = np.zeros(gaussians.n_channel, gaussians.n_block)
+    for i in range(gaussians.n_channel):
+        for j in range(gaussians.n_block):
+            for k in range(16):
+                if variable[f"x{i*gaussians.n_block*16 + j*16 + k}"].varValue != 0:
+                    qbits[i, j] = k+1
+    print('qbits.shape', qbits.shape)
 
-    logger.info('qbit searching: {}'.format(time.time() - bg))
+    # logger.info('qbit searching: {}'.format(time.time() - bg))
     
-    gaussians.init_qas(pipe.n_block, qbits)
-
+    # # gaussians.init_qas(pipe.n_block, qbits)
+    # # gaussians.update_bqa(qbits)
+    
     minimized_value = prob.objective.value()
     print("Minimized objective value:", minimized_value)
 
-    final_percent = purne_percent
+    # final_percent = purne_percent
     final_qbits = qbits
 
+    
+    
+    #debug
+    # final_qbits = [8]*73
     print("final qbits", final_qbits)
 
-    gaussians = GaussianModel(dataset.feat_dim, dataset.n_offsets, dataset.voxel_size, dataset.update_depth, dataset.update_init_factor, dataset.update_hierachy_factor, dataset.use_feat_bank, 
-                              dataset.appearance_dim, dataset.ratio, dataset.add_opacity_dist, dataset.add_cov_dist, dataset.add_color_dist, dataset.raht, dataset.use_pcc)
+    gaussians = GaussianModel(
+        dataset.feat_dim, dataset.n_offsets, 
+        dataset.voxel_size, dataset.update_depth, 
+        dataset.update_init_factor, dataset.update_hierachy_factor, 
+        dataset.use_feat_bank, dataset.appearance_dim, 
+        dataset.ratio, dataset.add_opacity_dist, 
+        dataset.add_cov_dist, dataset.add_color_dist, 
+        dataset.raht, pipe.n_block, dataset.unit_length, 
+        dataset.use_pcc, logger=logger)
+    
     scene = Scene(dataset, gaussians, load_iteration=load_iteration, shuffle=False)
-    gaussians.training_setup(opt)
+    # gaussians.training_setup(opt)
+    all_anchor_size = int(gaussians._anchor.shape[0])
     
     with torch.no_grad():
-        gaussians.eval()
-        imp = cal_imp(gaussians, scene.getTrainCameras(), pipe, background)
-        print(imp.shape)
+        if imp is None:
+            gaussians.eval()
+            imp = cal_imp(gaussians, scene.getTrainCameras(), pipe, background)
+            # print(imp.shape)
+        imp = imp.detach()
+        # purne_percent = get_percent(dataset.target_size*1024*1024, best_qbit*73, pipe.n_block, all_anchor_size, offset)
+        purne_percent = 0.6
+        print(purne_percent)
+        pmask = prune_mask(purne_percent, imp)
+        remain_imp = imp[torch.logical_not(pmask)]
+        gaussians.prune_anchor_no_grad(pmask)
     
-        pmask = prune_mask(final_percent, imp)
-        imp = imp[torch.logical_not(pmask)]
-        gaussians.prune_anchor(pmask)
-    
-    gaussians.octree_init_train()
-    gaussians.train()
     torch.cuda.empty_cache()
     
+    if pipe.enable_octree_training is False:
+        gaussians.octree_offline(copy.deepcopy(remain_imp), dataset.oct_merge)
+    
+    # gaussians.octree_init_train()
+    # gaussians.training_setup(opt)
+    # gaussians.octree_train(copy.deepcopy(remain_imp), dataset.oct_merge, raht=dataset.raht)
+    gaussians.init_bqa(final_qbits, dp=False)
     gaussians.training_setup(opt)
     gaussians.train()
 
     iter_start = torch.cuda.Event(enable_timing = True)
     iter_end = torch.cuda.Event(enable_timing = True)
+    octree_train_start = torch.cuda.Event(enable_timing = True)
+    octree_train_end = torch.cuda.Event(enable_timing = True)
+    change_dp_start = torch.cuda.Event(enable_timing = True)
+    change_dp_end = torch.cuda.Event(enable_timing = True)
+    prefilter_voxel_start = torch.cuda.Event(enable_timing = True)
+    prefilter_voxel_end = torch.cuda.Event(enable_timing = True)
     loss_best = 0.05
     best_iteration = 0
 
@@ -385,22 +498,31 @@ def training(dataset, opt, pipe, dataset_name, testing_iterations, saving_iterat
     ema_loss_for_log = 0.0
     progress_bar = tqdm(range(first_iter, opt.iterations), desc="Training progress")
     first_iter += 1
-    dp=False
+    # dp=False
     logger.info("start Training")
+    
+    
     for iteration in range(first_iter, opt.iterations + 1):
         
         iter_start.record()
-
+        gaussians.optimizer.zero_grad()
         gaussians.update_learning_rate(iteration)
-        gaussians.octree_train(imp, dataset.oct_merge, raht=dataset.raht)
+        
+        # octree_train_start.record()
+        # 
+        # octree_train_end.record()
+        
+        # if iteration == 1:
+            
+            # gaussians.init_qas(pipe.n_block, final_qbits)
+            # gaussians.update_bqa(final_qbits)
+            # gaussians.set_dp_split(dp=dp)
+            # print(gaussians.dp_split[0])
 
-        if iteration ==1:
-            gaussians.init_qas(pipe.n_block, final_qbits)
-            gaussians.set_dp_split(dp=dp, unit_length=dataset.unit_length, n_block = pipe.n_block)
-            print(gaussians.dp_split[0])
-
-        gaussians.change_dp_split(dp=dp, unit_length=dataset.unit_length)
-
+        # change_dp_start.record()
+        # gaussians.change_dp_split(dp=dp)
+        # change_dp_end.record()
+        
         bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
         background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
         # Pick a random Camera
@@ -412,10 +534,14 @@ def training(dataset, opt, pipe, dataset_name, testing_iterations, saving_iterat
         if (iteration - 1) == debug_from:
             pipe.debug = True
         
-        voxel_visible_mask = prefilter_voxel(viewpoint_cam, gaussians, pipe,background, training=True)
+        prefilter_voxel_start.record()
+        voxel_visible_mask = prefilter_voxel(viewpoint_cam, gaussians, pipe, background, training=True)
+        prefilter_voxel_end.record()
         retain_grad = (iteration < opt.update_until and iteration >= 0)
-        visible_mask = torch.ones(gaussians.get_anchor_v.shape[0], dtype=torch.bool, device = gaussians.get_anchor_v.device)
+        # visible_mask = torch.ones(gaussians.get_anchor_v.shape[0], dtype=torch.bool, device = gaussians.get_anchor_v.device)
+        
         render_pkg = ft_render(viewpoint_cam, gaussians, pipe, background, visible_mask=voxel_visible_mask, retain_grad=retain_grad)
+        
         image, viewspace_point_tensor, visibility_filter, offset_selection_mask, radii, scaling, opacity = render_pkg["render"], render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["selection_mask"], render_pkg["radii"], render_pkg["scaling"], render_pkg["neural_opacity"]
         gt_image = viewpoint_cam.original_image.cuda()
         Ll1 = l1_loss(image, gt_image)
@@ -424,8 +550,16 @@ def training(dataset, opt, pipe, dataset_name, testing_iterations, saving_iterat
         scaling_reg = scaling.prod(dim=1).mean()
         loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * ssim_loss + 0.01*scaling_reg
         loss.backward()
-
+        
+        torch.cuda.synchronize()
+        torch.cuda.empty_cache()
+        
         iter_end.record()
+        # logger.info("Training octree_train_start {}".format(octree_train_start.elapsed_time(octree_train_end)))
+        # logger.info("Training change_dp_start {}".format(change_dp_start.elapsed_time(change_dp_end)))
+        logger.info("Training prefilter_voxel_start {}".format(prefilter_voxel_start.elapsed_time(prefilter_voxel_end)))
+        # logger.info("Training iter {}".format(iter_start.elapsed_time(iter_end)))
+        
         with torch.no_grad():
             # Progress bar
             ema_loss_for_log = 0.4 * loss.item() + 0.6 * ema_loss_for_log
@@ -553,55 +687,102 @@ def training_report(tb_writer, dataset_name, iteration, Ll1, loss, l1_loss, elap
 
 def render_set(model_path, name, iteration, views, gaussians, pipeline, background):
     render_path = os.path.join(model_path, name, "ours_{}".format(iteration), "renders")
-    error_path = os.path.join(model_path, name, "ours_{}".format(iteration), "errors")
     gts_path = os.path.join(model_path, name, "ours_{}".format(iteration), "gt")
-    makedirs(render_path, exist_ok=True)
-    makedirs(error_path, exist_ok=True)
-    makedirs(gts_path, exist_ok=True)
-    
-    t_list = []
-    visible_count_list = []
+    error_path = os.path.join(model_path, name, "ours_{}".format(iteration), "errors")
+    if not os.path.exists(render_path):
+        os.makedirs(render_path)
+    if not os.path.exists(gts_path):
+        os.makedirs(gts_path)
+    if not os.path.exists(error_path):
+        os.makedirs(error_path)
+
     name_list = []
     per_view_dict = {}
-    for idx, view in enumerate(tqdm(views, desc="Rendering save progress")):
-        
-        torch.cuda.synchronize();t_start = time.time()
-        
+    # debug = 0
+    t_list = []
+    visible_count_list = []
+    for idx, view in enumerate(tqdm(views, desc="Rendering progress")):
+
+        torch.cuda.synchronize(); t0 = time.time()
         voxel_visible_mask = prefilter_voxel(view, gaussians, pipeline, background)
-        torch.cuda.synchronize()
-        rendersave(view, gaussians, pipeline, background, visible_mask=voxel_visible_mask, idx=idx)
-        torch.cuda.synchronize();t_end = time.time()
-        t_list.append(t_end - t_start)
+        render_pkg = render(view, gaussians, pipeline, background, visible_mask=voxel_visible_mask)
+        torch.cuda.synchronize(); t1 = time.time()
+        
+        t_list.append(t1-t0)
 
-    for idx, view in enumerate(tqdm(views, desc="Rendering load progress")):
-
-        # renders
-        torch.cuda.empty_cache()
-        render_pkg = renderload(idx = idx)
-        rendering = torch.clamp(render_pkg["render"], 0.0, 1.0)
+        rendering = render_pkg["render"]
+        
         visible_count = (render_pkg["radii"] > 0).sum()
         visible_count_list.append(visible_count)
 
-
-        # gts
         gt = view.original_image[0:3, :, :]
-        
-        # error maps
         errormap = (rendering - gt).abs()
-
-
         name_list.append('{0:05d}'.format(idx) + ".png")
+        per_view_dict['{0:05d}'.format(idx) + ".png"] = visible_count.item()
         torchvision.utils.save_image(rendering, os.path.join(render_path, '{0:05d}'.format(idx) + ".png"))
         torchvision.utils.save_image(errormap, os.path.join(error_path, '{0:05d}'.format(idx) + ".png"))
         torchvision.utils.save_image(gt, os.path.join(gts_path, '{0:05d}'.format(idx) + ".png"))
-        per_view_dict['{0:05d}'.format(idx) + ".png"] = visible_count.item()
-        torch.cuda.empty_cache()
 
-    
+    t = np.array(t_list[5:])
+    fps = 1.0 / t.mean()
+    print(f'Test FPS: \033[1;35m{fps:.5f}\033[0m')
+
     with open(os.path.join(model_path, name, "ours_{}".format(iteration), "per_view_count.json"), 'w') as fp:
-            json.dump(per_view_dict, fp, indent=True)
+        json.dump(per_view_dict, fp, indent=True)      
     
     return t_list, visible_count_list
+    
+# def render_set(model_path, name, iteration, views, gaussians, pipeline, background):
+#     render_path = os.path.join(model_path, name, "ours_{}".format(iteration), "renders")
+#     error_path = os.path.join(model_path, name, "ours_{}".format(iteration), "errors")
+#     gts_path = os.path.join(model_path, name, "ours_{}".format(iteration), "gt")
+#     makedirs(render_path, exist_ok=True)
+#     makedirs(error_path, exist_ok=True)
+#     makedirs(gts_path, exist_ok=True)
+    
+#     t_list = []
+#     visible_count_list = []
+#     name_list = []
+#     per_view_dict = {}
+#     for idx, view in enumerate(tqdm(views, desc="Rendering save progress")):
+        
+#         torch.cuda.synchronize();t_start = time.time()
+        
+#         voxel_visible_mask = prefilter_voxel(view, gaussians, pipeline, background)
+#         torch.cuda.synchronize()
+#         rendersave(view, gaussians, pipeline, background, visible_mask=voxel_visible_mask, idx=idx)
+#         torch.cuda.synchronize();t_end = time.time()
+#         t_list.append(t_end - t_start)
+
+#     for idx, view in enumerate(tqdm(views, desc="Rendering load progress")):
+
+#         # renders
+#         torch.cuda.empty_cache()
+#         render_pkg = renderload(idx = idx)
+#         rendering = torch.clamp(render_pkg["render"], 0.0, 1.0)
+#         visible_count = (render_pkg["radii"] > 0).sum()
+#         visible_count_list.append(visible_count)
+
+
+#         # gts
+#         gt = view.original_image[0:3, :, :]
+        
+#         # error maps
+#         errormap = (rendering - gt).abs()
+
+
+#         name_list.append('{0:05d}'.format(idx) + ".png")
+#         torchvision.utils.save_image(rendering, os.path.join(render_path, '{0:05d}'.format(idx) + ".png"))
+#         torchvision.utils.save_image(errormap, os.path.join(error_path, '{0:05d}'.format(idx) + ".png"))
+#         torchvision.utils.save_image(gt, os.path.join(gts_path, '{0:05d}'.format(idx) + ".png"))
+#         per_view_dict['{0:05d}'.format(idx) + ".png"] = visible_count.item()
+#         torch.cuda.empty_cache()
+
+    
+#     with open(os.path.join(model_path, name, "ours_{}".format(iteration), "per_view_count.json"), 'w') as fp:
+#             json.dump(per_view_dict, fp, indent=True)
+    
+    # return t_list, visible_count_list
 
 
 
@@ -611,8 +792,15 @@ def render_sets(train_ds : ModelParams, iteration : int, pipeline : PipelinePara
         dataset.mesongs = False
         dataset.raht = False
         
-        gaussians = GaussianModel(dataset.feat_dim, dataset.n_offsets, dataset.voxel_size, dataset.update_depth, dataset.update_init_factor, dataset.update_hierachy_factor, dataset.use_feat_bank, 
-                              dataset.appearance_dim, dataset.ratio, dataset.add_opacity_dist, dataset.add_cov_dist, dataset.add_color_dist, raht=False, use_pcc=dataset.use_pcc)
+        gaussians = GaussianModel(
+            dataset.feat_dim, dataset.n_offsets, 
+            dataset.voxel_size, dataset.update_depth, 
+            dataset.update_init_factor, dataset.update_hierachy_factor, 
+            dataset.use_feat_bank, dataset.appearance_dim, 
+            dataset.ratio, dataset.add_opacity_dist, 
+            dataset.add_cov_dist, dataset.add_color_dist, 
+            raht=False, n_block=pipeline.n_block, unit_length=dataset.unit_length, 
+            use_pcc=dataset.use_pcc, logger=logger)
         scene = Scene(dataset, gaussians, load_iteration=iteration, shuffle=False, load_compressed=load_compressed)
         gaussians.eval()
 

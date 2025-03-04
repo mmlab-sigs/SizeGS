@@ -360,7 +360,14 @@ def renderload(idx=-1):
                 }
     
 
-def ft_gng(viewpoint_camera, rf, pc : GaussianModel, visible_mask=None, is_training=False):
+def ft_gng(
+    viewpoint_camera, 
+    rf: torch.Tensor, 
+    xyz: torch.Tensor, 
+    pc : GaussianModel, 
+    visible_mask=None, 
+    is_training=False
+):
     ## view frustum filtering for acceleration    
     if visible_mask is None:
         visible_mask = torch.ones(pc.get_anchor_v.shape[0], dtype=torch.bool, device = pc.get_anchor_v.device)
@@ -368,7 +375,8 @@ def ft_gng(viewpoint_camera, rf, pc : GaussianModel, visible_mask=None, is_train
     base = 0
     feat = rf[:, base:base+pc.feat_dim][visible_mask]
     base += pc.feat_dim
-    anchor = pc.get_anchor_v[visible_mask]
+    # anchor = pc.get_anchor_v[visible_mask]
+    anchor = xyz[visible_mask]
     grid_offsets = rf[:, base:base + pc.n_offsets*3].reshape([-1, pc.n_offsets, 3])[visible_mask]
     base += pc.n_offsets*3
     base += 1
@@ -474,16 +482,23 @@ def ft_render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tenso
     """
     is_training = True
     
+    
     if pc.raht:
-        drf = pc.apply_raht_quant(training=True)
+        xyz, drf = pc.apply_raht_quant(training=True)
     else:
-        drf = pc.apply_quant()
+        xyz, drf = pc.apply_quant()
 
-    xyz, color, opacity, scaling, rot, neural_opacity, mask = ft_gng(viewpoint_camera, drf, pc, visible_mask, is_training=is_training)
+    xyz, color, opacity, scaling, rot, neural_opacity, mask = ft_gng(
+        viewpoint_camera, 
+        drf, 
+        xyz,
+        pc, 
+        visible_mask, 
+        is_training=is_training)
 
     
     # Create zero tensor. We will use it to make pytorch return gradients of the 2D (screen-space) means
-    screenspace_points = torch.zeros_like(xyz, dtype=pc.get_anchor_v.dtype, requires_grad=True, device="cuda") + 0
+    screenspace_points = torch.zeros_like(xyz, dtype=xyz.dtype, requires_grad=True, device="cuda") + 0
     if retain_grad:
         try:
             screenspace_points.retain_grad()
@@ -511,17 +526,17 @@ def ft_render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tenso
         debug=pipe.debug
     )
 
-    raster_settings_dict = {
-        "image_height": int(viewpoint_camera.image_height),
-        "image_width": int(viewpoint_camera.image_width),
-        "tanfovx": tanfovx,
-        "tanfovy": tanfovy,
-        "scale_modifier": scaling_modifier,
-        "sh_degree": 1,
-        "prefiltered": False,
-        "meson_count": meson_count,
-        "debug": pipe.debug
-    }
+    # raster_settings_dict = {
+    #     "image_height": int(viewpoint_camera.image_height),
+    #     "image_width": int(viewpoint_camera.image_width),
+    #     "tanfovx": tanfovx,
+    #     "tanfovy": tanfovy,
+    #     "scale_modifier": scaling_modifier,
+    #     "sh_degree": 1,
+    #     "prefiltered": False,
+    #     "meson_count": meson_count,
+    #     "debug": pipe.debug
+    # }
 
 
     rasterizer = GaussianRasterizer(raster_settings=raster_settings)
@@ -582,10 +597,13 @@ def prefilter_voxel(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch
     Background tensor (bg_color) must be on GPU!
     """
     # Create zero tensor. We will use it to make pytorch return gradients of the 2D (screen-space) means
-    if training:
-        screenspace_points = torch.zeros_like(pc.get_anchor_v, dtype=pc.get_anchor_v.dtype, requires_grad=True, device="cuda") + 0
-    else:
-        screenspace_points = torch.zeros_like(pc.get_anchor, dtype=pc.get_anchor.dtype, requires_grad=True, device="cuda") + 0
+    
+    means3D, features = pc.get_render_attributes()
+    # if training:
+    #     screenspace_points = torch.zeros_like(means3D, dtype=means3D.dtype, requires_grad=True, device="cuda") + 0
+    # else:
+    screenspace_points = torch.zeros_like(means3D, dtype=means3D.dtype, requires_grad=True, device="cuda") + 0
+    
     try:
         screenspace_points.retain_grad()
     except:
@@ -613,10 +631,10 @@ def prefilter_voxel(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch
 
     rasterizer = GaussianRasterizer(raster_settings=raster_settings)
 
-    if training:
-        means3D = pc.get_anchor_v
-    else:
-        means3D = pc.get_anchor
+    # if training:
+    #     means3D = pc.get_anchor_v
+    # else:
+    #     means3D = pc.get_anchor
 
 
     # If precomputed 3d covariance is provided, use it. If not, then it will be computed from
@@ -624,23 +642,31 @@ def prefilter_voxel(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch
     scales = None
     rotations = None
     cov3D_precomp = None
-    if training:
-        if pipe.compute_cov3D_python:
-            cov3D_precomp = pc.get_covariance_v(scaling_modifier)
-        else:
-            scales = pc.get_scaling_v
-            rotations = pc.get_rotation_v
+    if pipe.compute_cov3D_python:
+        scales = 1.0 * pc.scaling_activation(features[:, 63:66])
+        rotations = pc.rotation_activation(features[:, 69:73])
     else:
-        if pipe.compute_cov3D_python:
-            cov3D_precomp = pc.get_covariance(scaling_modifier)
-        else:
-            scales = pc.get_scaling
-            rotations = pc.get_rotation
-
+        tmp_scales = 1.0 * pc.scaling_activation(features[:, 63:66])
+        tmp_rotations = pc.rotation_activation(features[:, 69:73])
+        cov3D_precomp = pc.covariance_activation(tmp_scales, scaling_modifier, tmp_rotations)
+        
     
-
+    # if training:
+    #     if pipe.compute_cov3D_python:
+    #         cov3D_precomp = pc.get_covariance_v(scaling_modifier)
+    #     else:
+    #         scales = pc.get_scaling_v
+    #         rotations = pc.get_rotation_v
+    # else:
+    #     if pipe.compute_cov3D_python:
+    #         cov3D_precomp = pc.get_covariance(scaling_modifier)
+    #     else:
+    #         scales = pc.get_scaling
+    #         rotations = pc.get_rotation
+    
+    # [:,:3]
     radii_pure = rasterizer.visible_filter(means3D = means3D, #(N,3)
-        scales = scales[:,:3], #(N,6)
+        scales = scales, #(N,3)
         rotations = rotations, #(N,4)
         cov3D_precomp = cov3D_precomp)
 

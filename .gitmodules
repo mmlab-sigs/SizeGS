@@ -1,0 +1,3 @@
+[submodule "submodules/BDD"]
+	path = submodules/BDD
+	url = https://github.com/LPMP/BDD.git

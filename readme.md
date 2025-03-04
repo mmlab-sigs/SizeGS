@@ -3,7 +3,7 @@
 ## 1. Cloning the Repository
 
 ```shell
-git clone https://github.com/mmlab-sigs/sizegs
+git clone https://github.com/mmlab-sigs/sizegs --recursive
 ```
 
 ## 2. Install
@@ -18,34 +18,49 @@ git clone https://github.com/mmlab-sigs/sizegs
 - C++ Compiler and CUDA SDK must be compatible
 
 ### 2.2 Setup
-
 Our provided install method is based on Conda package and environment management:
-
+<!-- 
 CUDA 11.6/11.8: 
 
 ```shell
 conda env create --file environment.yml
 conda activate sizegs
 pip install plyfile tqdm einops scipy open3d trimesh Ninja seaborn loguru pandas
-```
+``` -->
 
 CUDA 12.1/12.4:
 
 ```shell
 conda create -n sizegs python=3.10
 conda activate sizegs
-pip install torch==2.1.0+cu121 torchvision==0.16.0+cu121 torchaudio==2.1.0+cu121 --index-url https://download.pytorch.org/whl/cu121
-pip install torch_scatter
-pip install tqdm plyfile einops wandb lpips laspy
+pip install torch==2.2.2+cu121 torchvision==0.17.2+cu121 torchaudio==2.2.2+cu121 --index-url https://download.pytorch.org/whl/cu121
+pip install torch-scatter -f https://data.pyg.org/whl/torch-2.2.2+cu121.html
+pip install tqdm plyfile einops wandb lpips laspy colorama jaxtyping opencv-python tensorboard loguru pulp Ninja open3d
 pip install submodules/diff-gaussian-rasterization
 pip install submodules/simple-knn
 pip install submodules/octree
 pip install submodules/quant
-pip install colorama jaxtyping opencv-python tensorboard loguru pulp Ninja open3d
+pip install numpy==1.26.4
+
+cd submodules/BDD
+git checkout f377a82736435bc4988e2c41e5c8029c168e9505
+setup.py line 94: set 
+cmake_args = ['-DCMAKE_LIBRARY_OUTPUT_DIRECTORY=' + extdir,
+    '-DPYTHON_EXECUTABLE=' + sys.executable,
+    '-DCMAKE_CUDA_COMPILER=/usr/local/cuda-12.4/bin/nvcc',
+    '-DCUDA_NVCC_EXECUTABLE=/usr/local/cuda-12.4/bin/nvcc',
+    '-DTHRUST_DEVICE_SYSTEM=THRUST_DEVICE_SYSTEM_CUDA'
+]
+sudo apt-get update
+sudo apt-get upgrade
+sudo apt-get install libboost-all-dev
+cd ../../
+pip install submodules/BDD
+conda update -c conda-forge libstdcxx-ng
 ```
 
-### 2.3 Preparing dataset and pre-trained 3D Gaussians
-
+### 2.3 Preparing dataset and pre-trained ScaffoldGSes
+#### 2.3.1 Dataset
 First, create a ```data/``` folder inside the project path by 
 
 ```
@@ -74,42 +89,41 @@ data/
 ...
 ```
 
+#### 2.3.2 Pretrained ScaffoldGSes
 Then, create a ```outputs/``` folder inside the project path by 
 
 ```
 mkdir outputs
 ```
 
-The output structure will be organised as follows:
+Take T&T as an example, the ```outputs/tandt``` structure should be organized as follows. An example *lego* ScaffoldGS can be downloaded from [here](https://drive.google.com/file/d/1QcRPs6mIHaFZOCYFEzT75G8k2vkYE7vL/view?usp=drive_link). These pretrained ScaffoldGSes serve at the input of our code.
 
 ```
-outputs/
-├── dataset_name
-│   ├── scene1/
-│   │   ├── baseline/
-│   │   │   ├── cameras.json
-|   |   |   ├── cfg_args
-|   |   |   ├── input.ply
-|   |   |   └── point_cloud
-|   |   |       ├── iteration_30000
-|   |   |       │   └── point_cloud.ply
-|   |   |       └── iteration_7000
-|   |   |          └── point_cloud.ply
-│   │   ├── sizegs/
-│   │       └── the output of the sizegs
-│   ├── scene2/
-│   │   ├── baseline/
-│   │   │   ├── cameras.json
-|   |   |   ├── cfg_args
-|   |   |   ├── input.ply
-|   |   |   └── point_cloud
-|   |   |       ├── iteration_30000
-|   |   |       │   └── point_cloud.ply
-|   |   |       └── iteration_7000
-|   |   |          └── point_cloud.ply
-│   │   ├── sizegs/
-│   │       └── the output of the sizegs
-...
+.
+├── train
+│   └── baseline
+│       └── scaffold
+│           ├── backup
+│           ├── cameras.json
+│           ├── cfg_args
+│           ├── input.ply
+│           ├── outputs.log
+│           ├── per_view.json
+│           ├── point_cloud
+│           ├── results.json
+│           └── test
+└── truck
+    └── baseline
+        └── scaffold
+            ├── backup
+            ├── cameras.json
+            ├── cfg_args
+            ├── input.ply
+            ├── outputs.log
+            ├── per_view.json
+            ├── point_cloud
+            ├── results.json
+            └── test
 ```
 
 At last change the ```path/to/outputs/``` and ```path/to/data/``` in meson.sh with your path
@@ -138,4 +152,4 @@ If you find our work helpful, please consider citing:
 ```
 
 ## Acknowledgments
-This work is supported in part by National Key Research and Development Project of China (Grant No. 2023YFF0905502), Shenzhen Science and Technology Program (Grant No. JCYJ20220818101014030). We thank the valuable advices from anonymous ICLR reviewers.
+This work is supported in part by National Key Research and Development Project of China (Grant No. 2023YFF0905502), Shenzhen Science and Technology Program (Grant No. JCYJ20220818101014030). We thank the valuable advices from anonymous ICLR and CVPR reviewers.

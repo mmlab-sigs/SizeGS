@@ -11,7 +11,7 @@ time=$(date "+%Y-%m-%d_%H:%M:%S")
 logdir=sizegs_gpcc
 
 CUDA_VISIBLE_DEVICES=1 python meson.py \
-    --eval -s ~/storage/nerf_data/${log}/${name} \
+    --eval -s /mnt/storage/users/szxie_data/nerf_data/${log}/${name} \
     --lod 0 \
     --voxel_size ${voxel} \
     --target_size $size \
