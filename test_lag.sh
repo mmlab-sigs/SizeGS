@@ -1,12 +1,12 @@
 #!/bin/bash
 
 name=bicycle
-iter=1000
+iter=1
 length=1000
 voxel=0.0001
 log=360_v2
-block=60
-size=36
+block=20
+size=24
 time=$(date "+%Y-%m-%d_%H:%M:%S")
 logdir=sizegs_gpcc
 

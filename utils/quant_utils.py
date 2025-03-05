@@ -471,6 +471,7 @@ class SegQuant(Function):
             max_vals,
             outputs
         )
+        torch.cuda.synchronize()
         return outputs
     
     @staticmethod
@@ -487,12 +488,13 @@ def pure_quant(
     ):
     
     inputs = inputs.transpose(0, 1).contiguous() 
-    splits = torch.cumsum(splits, dim=1).int().contiguous()
+    cum_splits = torch.cumsum(splits, dim=1).int().contiguous()
     min_vals = min_vals.contiguous()
     max_vals = max_vals.contiguous()
-    outputs = torch.empty_like(inputs).contiguous() 
-    scales = torch.empty_like(min_vals).contiguous() 
-    zero_points = torch.empty_like(min_vals).contiguous() 
+    power_qbits = power_qbits.contiguous()
+    outputs = torch.zeros_like(inputs).contiguous() 
+    scales = torch.zeros_like(min_vals).contiguous() 
+    zero_points = torch.zeros_like(min_vals).contiguous() 
     
     # print('inputs.dtype', inputs.dtype)
     # print('splits.dtype', splits.dtype)
@@ -500,7 +502,7 @@ def pure_quant(
     # print('splits.dtype', splits.dtype)
     segquant.quant_forward(
         inputs, 
-        splits,
+        cum_splits,
         power_qbits,
         min_vals,
         max_vals,
@@ -533,13 +535,13 @@ def quant_reverse(
     return outputs.transpose(0, 1)
 
 class BatchQuant(nn.Module):
-    def __init__(self, channel_num: int, block_num: int, qbits: list, splits: torch.Tensor):
+    def __init__(self, channel_num: int, block_num: int, qbits: torch.Tensor, splits: torch.Tensor):
         super().__init__()
         self.channel_num = channel_num
         self.block_num = block_num
         min_vals = torch.zeros([channel_num, block_num]).requires_grad_(False)
         max_vals = torch.zeros([channel_num, block_num]).requires_grad_(False)
-        qbits = torch.pow(2, torch.tensor(qbits, dtype=int)) - 1
+        qbits = torch.pow(2, qbits.int()) - 1
         qbits = qbits.to(torch.int32).requires_grad_(False)
         # splits = torch.tensor(splits, dtype=int)
         cum_splits = torch.cumsum(splits, dim=1).requires_grad_(False) # cumulate
@@ -553,7 +555,7 @@ class BatchQuant(nn.Module):
         self.min_vals = torch.zeros([self.channel_num, self.block_num]).requires_grad_(False)
         self.max_vals = torch.zeros([self.channel_num, self.block_num]).requires_grad_(False)
         if qbits is not None:
-            qbits = torch.pow(2, torch.tensor(qbits, dtype=int)) - 1
+            qbits = torch.pow(2, qbits) - 1
             self.qbits = qbits.to(torch.int32).requires_grad_(False)
         if splits is not None:
             self.cum_splits = torch.cumsum(splits, dim=1).cuda().requires_grad_(False)
@@ -577,10 +579,10 @@ def cal_diff_wrapper(
     qbits: torch.Tensor
 ):
     inputs = inputs.transpose(0, 1).contiguous() 
-    cum_splits = torch.cumsum(splits, dim=1).int().contiguous()
+    cum_splits = torch.cumsum(splits, dim=1).int().contiguous() # [C, B]
     min_vals = torch.zeros([channel_num, block_num]).contiguous().cuda()
     max_vals = torch.zeros([channel_num, block_num]).contiguous().cuda()
-    power_qbits = torch.pow(2, qbits).int().contiguous() - 1
+    power_qbits = torch.pow(2, qbits).int().contiguous() - 1 # [C, B]
     outputs = torch.zeros([channel_num, block_num]).contiguous().cuda()
     segquant.cal_diff(
         inputs, 
@@ -590,7 +592,7 @@ def cal_diff_wrapper(
         max_vals,
         outputs
     )
-    
+    torch.cuda.synchronize()
     return outputs
 
 if __name__ == '__main__':

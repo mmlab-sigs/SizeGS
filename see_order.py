@@ -1,5 +1,5 @@
 import numpy as np 
 
-reorder = np.load('/home/szxie/SizeGS/exp_data/reorder.npy')
+A = np.load('/home/szxie/SizeGS/exp_data/A.npy')
 
-print(reorder[:20])
+print(A[0][-10:])

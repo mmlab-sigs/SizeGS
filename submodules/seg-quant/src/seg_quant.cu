@@ -24,7 +24,7 @@ __global__ void quant_kernel(
         float min_val = min_vals[idx];
         // printf("min_val %f\n", min_val);
         float max_val = max_vals[idx];
-        int qmax = power_qbits[c];
+        int qmax = power_qbits[idx];
         int quant_length = end_idx - start_idx;
         float tmp = 0;
         const float* features_ptr = features + c * N + start_idx;
@@ -100,7 +100,7 @@ __global__ void quant_forward_kernel(
         float min_val = min_vals[idx];
         // printf("min_val %f\n", min_val);
         float max_val = max_vals[idx];
-        float qmax = power_qbits[c];
+        float qmax = power_qbits[idx];
         
         int quant_length = end_idx - start_idx;
         float tmp = 0;
@@ -250,12 +250,12 @@ __global__ void cal_diff_kernel(
     const int C,
     const int N,
     const int B,
-    const float * __restrict__ features, 
-    const int * __restrict__ cum_splits, 
-    const int * __restrict__ power_qbits, 
-    float* min_vals,
-    float* max_vals,
-    float* out_diff
+    const float * __restrict__ features, // [C, N]
+    const int * __restrict__ cum_splits, // [C, B]
+    const int * __restrict__ power_qbits,  // [C, B]
+    float* min_vals, // [C, B]
+    float* max_vals, // [C, B]
+    float* out_diff  // [C, B]
 ) {
     int idx = threadIdx.x + blockIdx.x * blockDim.x;
     if (idx < B * C) {

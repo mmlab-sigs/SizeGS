@@ -140,36 +140,52 @@ def get_percent(target_size, qbit, n_block, anchor_size, offset):
     n = int((target_size - 50*1024 - 4*n_block - offset*1024*1024)*8 - 73*32 - 73*n_block*32*2 - 2*32 - n_block*32 + qbit)/(qbit+64)
     return (anchor_size - n)/anchor_size
 
-def newSize(n, qbits, n_block, splits, offset):
-    remain = (73*32 + n*64 + 73*n_block*32*2 + 2*32 + n_block*32)/8 + 50*1024 + 4*n_block +offset*1024*1024
+def newSize(n, n_block, target_size, offset):
+    remain = (73*32 + n*64 + 73*n_block*32*2 + 2*32 )/8 + 50*1024 + offset*1024*1024
     # Todo: rewrite the new Size function.
     # return qbits < ?
+    return target_size - remain 
     
-def create_ilp_problem(L, n_bit, n_channel, n_block):
+    
+def create_ilp_problem(L, n_bit, n_channel, n_block, splits, qbit_size):
     n_variable = n_bit * n_channel * n_block
     objective = {}
+    size_coni = {}
     for i in range(n_variable):
-        objective[f"x{i}"] = L[i] 
+        objective[f"x{i}"] = L[i]
+        re = (i % n_bit) + 1
+        cbi = int(i // n_bit)
+        ci = int(cbi // n_block) 
+        bi = int(cbi % n_block)
+        size_coni[f"x{i}"] = re * int(splits[ci, bi].item())
         
     constraints = []
-    
-    n_cons = 1
+    # TODO: add size constraint
+    # n_cons = 1
     for i in range(n_channel * n_block):
-        coni = [f'C{i}']
+        coni = [f'C{i+1}']
         coni_dict = {}
-        for j in range(16):
-            coni_dict[f"x{i*16+j}"] = 1.0
+        for j in range(n_bit):
+            coni_dict[f"x{i*n_bit+j}"] = 1.0
         coni.append(coni_dict)
         coni.append('=')
         coni.append(1.0)
+        # print(coni)
+        constraints.append(coni)
     
+    constraints.append([
+        f'C{n_channel * n_block + 1}',
+        size_coni,
+        '<',
+        qbit_size
+    ])
     
-    objective = {'x1': 2.0, 'x2': 1.0, 'x3': -1.0, 'x4': 1.0, 'x5': -2.0, 'x6': -5.0}
-    constraints = [
-        ['C1', {'x1': 1.0, 'x2': 1.0, 'x3': 1.0}, '=', 1.0],
-        ['C2', {'x3': 1.0, 'x4': 1.0, 'x5': 1.0}, '<', 1.0],
-        ['C3', {'x4': 1.0, 'x5': 1.0, 'x6': 1.0}, '>', 1.0]
-    ]
+    # objective = {'x1': 2.0, 'x2': 1.0, 'x3': -1.0, 'x4': 1.0, 'x5': -2.0, 'x6': -5.0}
+    # constraints = [
+    #     ['C1', {'x1': 1.0, 'x2': 1.0, 'x3': 1.0}, '=', 1.0],
+    #     ['C2', {'x3': 1.0, 'x4': 1.0, 'x5': 1.0}, '<', 1.0],
+    #     ['C3', {'x4': 1.0, 'x5': 1.0, 'x6': 1.0}, '>', 1.0]
+    # ]
     ilp = ilp_instance.ILP_instance()
     for var_name, coeff in objective.items():
         ilp.add_new_variable_with_obj(var_name, coeff)
@@ -192,142 +208,16 @@ def create_ilp_problem(L, n_bit, n_channel, n_block):
     return ilp
 
 
-
-
 def training(dataset, opt, pipe, dataset_name, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from, load_iteration, wandb=None, logger=None, ply_path=None):
     first_iter = 0
     tb_writer = prepare_output_and_logger(dataset)
     bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
     background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
 
-    final_percent = 0
-    min_drf_shape = 99999999
-    final_qbits = [0]*73
-    best_qbit = 8
-    offset = 0
-
-    t = time.time()
-
+    # final_qbits = [0]*73
     imp = None
-    # for target_qbit in range(8,10):
-    #     gaussians = GaussianModel(
-    #         dataset.feat_dim, dataset.n_offsets, 
-    #         dataset.voxel_size, dataset.update_depth, 
-    #         dataset.update_init_factor, dataset.update_hierachy_factor, 
-    #         dataset.use_feat_bank, dataset.appearance_dim, 
-    #         dataset.ratio, dataset.add_opacity_dist, 
-    #         dataset.add_cov_dist, dataset.add_color_dist, 
-    #         dataset.raht, pipe.n_block, dataset.unit_length,
-    #         dataset.use_pcc, logger=logger)
-    #     scene = Scene(dataset, gaussians, load_iteration=load_iteration, shuffle=False)
-
-    #     all_anchor_size = int(gaussians._anchor.shape[0])
-    #     # gaussians.training_setup(opt)
-        
-    #     with torch.no_grad():
-    #         if imp is None:
-    #             gaussians.eval()
-    #             imp = cal_imp(gaussians, scene.getTrainCameras(), pipe, background)
-    #             print(imp.shape)
-    #         imp = imp.detach()
-    #         purne_percent = get_percent(dataset.target_size*1024*1024, best_qbit*73, pipe.n_block, all_anchor_size, offset)
-    #         print(purne_percent)
-    #         pmask = prune_mask(purne_percent, imp)
-    #         remain_imp = imp[torch.logical_not(pmask)]
-    #         gaussians.prune_anchor_no_grad(pmask)
-        
-    #     gaussians.octree_init_train()
-    #     # gaussians.train()
-    #     torch.cuda.empty_cache()
-        
-    #     gaussians.training_setup(opt)
-    #     gaussians.octree_train(remain_imp, dataset.oct_merge, raht=dataset.raht)
-
-    #     # gaussians.init_qas(pipe.n_block, [target_qbit]*73)
-
-    #     # dp=False
-    #     # gaussians.set_dp_split(dp=dp, unit_length=dataset.unit_length, n_block = pipe.n_block)
-        
-    #     gaussians.init_bqa([target_qbit]*73, dp=False)
-        
-    #     gaussians.train()
-
-    #     model_size_limit = dataset.target_size*1024*1024
-    #     N1 = 73
-
-    #     num_variable = N1 * 16
-
-    #     L = gaussians.get_ddrf()
-    #     assert len(L) == num_variable, "Length of L does not match number of variables."
-
-    #     variable = {}
-    #     for i in range(num_variable):
-    #         variable[f"x{i}"] = LpVariable(f"x{i}", 0, 1, cat=LpInteger)
-
-    #     prob = LpProblem("Model_Size", LpMinimize)
-
-    #     prob += Size(gaussians._anchor_v.shape[0], [variable[f"x{i}"] for i in range(num_variable)], pipe.n_block, 0) <= model_size_limit
-
-    #     for le in range(0, N1):
-    #         ri = le * 16 + 16
-    #         prob += sum([variable[f"x{i}"] for i in range(le * 16, ri)]) == 1
-
-    #     prob += sum([(variable[f"x{i}"]) * L[i] for i in range(num_variable)])
-
-    #     time_limit = 200
-
-    #     # 使用CBC求解器并设置时间限制
-    #     prob.solve(PULP_CBC_CMD(timeLimit=time_limit, msg=True))
-
-    #     solution = {}
-    #     for i in range(num_variable):
-    #         solution[f"x{i}"] = variable[f"x{i}"].varValue
-
-    #     qbits = [0]*73
-    #     for i in range(73):
-    #         for j in range(16):
-    #             if variable[f"x{i*16+j}"].varValue != 0:
-    #                 qbits[i] = j+1
-
-    #     # gaussians.init_qas(pipe.n_block, qbits)
-        
-    #     gaussians.init_bqa([target_qbit]*73, dp=False)
-    #     gaussians.train()
-        
-    #     minimized_value = prob.objective.value()
-    #     print("Minimized objective value:", minimized_value)
-    #     drf = 0
-    #     for i in range(73):
-    #         drf += L[i*16+7]
-    #     print(drf)
-    #     drf_shape = minimized_value/gaussians._anchor.shape[0]
-    #     if drf_shape < min_drf_shape:
-    #         min_drf_shape = drf_shape
-    #         final_percent = purne_percent
-    #         final_qbits = qbits
-    #         best_qbit = target_qbit
-        
-    #         bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
-    #         background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
-    #         viewpoint_stack = None
-    #         # Pick a random Camera
-    #         if not viewpoint_stack:
-    #             viewpoint_stack = scene.getTrainCameras().copy()
-    #         viewpoint_cam = viewpoint_stack.pop(randint(0, len(viewpoint_stack)-1))
-
-    #         voxel_visible_mask = prefilter_voxel(viewpoint_cam, gaussians, pipe,background, training=True)
-    #         retain_grad = False
-    #         render_pkg = ft_render(viewpoint_cam, gaussians, pipe, background, visible_mask=voxel_visible_mask, retain_grad=retain_grad)
-
-    #         offset = scene.save_compressed(0) - dataset.target_size
-    #         print("offset", offset)
-
     offset = 0 #debug only
-    # logger.info(final_qbits)
-    
-    # logger.info('probe time: {}'.format(time.time() - t))
-    # #再次规划
-    
+
     bg = time.time()
     gaussians = GaussianModel(
         dataset.feat_dim, dataset.n_offsets, 
@@ -344,7 +234,6 @@ def training(dataset, opt, pipe, dataset_name, testing_iterations, saving_iterat
     
     logger.info('load gaussian model time: {}'.format(time.time() - bg))
     
-    
     bg = time.time()
     with torch.no_grad():
         if imp is None:
@@ -354,7 +243,7 @@ def training(dataset, opt, pipe, dataset_name, testing_iterations, saving_iterat
         imp = imp.detach()
         # purne_percent = get_percent(dataset.target_size*1024*1024, best_qbit*73, pipe.n_block, all_anchor_size, offset)
         purne_percent = 0.6
-        print(purne_percent)
+        # print(purne_percent)
         pmask = prune_mask(purne_percent, imp)
         remain_imp = imp[torch.logical_not(pmask)]
         gaussians.prune_anchor_no_grad(pmask)
@@ -362,126 +251,69 @@ def training(dataset, opt, pipe, dataset_name, testing_iterations, saving_iterat
     
     if not pipe.enable_octree_training:
         gaussians.octree_offline(remain_imp.clone(), dataset.oct_merge)
-    # bg = time.time()
-    # gaussians.octree_init_train()
-    # # gaussians.train()
-    # # torch.cuda.empty_cache()
-    
-    # logger.info('octree init: {}'.format(time.time() - bg))
-    
-    # bg = time.time()
-    # gaussians.training_setup(opt)
 
-    # gaussians.octree_train(remain_imp, dataset.oct_merge, raht=dataset.raht)
-    # logger.info('octree train init: {}'.format(time.time() - bg))
-    
-    # bg = time.time()
-    # # gaussians.init_qas(pipe.n_block, [best_qbit]*73)
-    # gaussians.init_bqa([best_qbit]*73, dp=False)
-    # logger.info('init qas and dp: {}'.format(time.time() - bg))
-    # gaussians.train()
-    # # bg = time.time()
-    # # dp=False
-    # # gaussians.set_dp_split(dp=dp, unit_length=dataset.unit_length, n_block = pipe.n_block)
-    # # logger.info('set_dp_split: {}'.format(time.time() - bg))
-
-    # bg = time.time()
     model_size_limit = dataset.target_size*1024*1024
-    # N1 = 73
-
-    n_group = gaussians.n_channel * gaussians.n_block
     num_variable = gaussians.n_channel * gaussians.n_block * 16
 
     L = gaussians.get_fine_grained_ddrf()
     assert len(L) == num_variable, "Length of L does not match number of variables."
+    
+    qbit_upper_size = newSize(gaussians.n_point, gaussians.n_block, model_size_limit, offset=offset)
+    print('qbit_upper_size', qbit_upper_size)
+    ilp = create_ilp_problem(
+        L,
+        n_bit = 16,
+        n_channel = gaussians.n_channel,
+        n_block = gaussians.n_block,
+        splits = gaussians.dp_split,
+        qbit_size = qbit_upper_size
+    )
 
-    variable = {}
-    for i in range(num_variable):
-        variable[f"x{i}"] = LpVariable(f"x{i}", 0, 1, cat=LpInteger)
+    # passing ilp instance to solver options
+    opts = bdd_solver_options(ilp)
 
-    prob = LpProblem("Model_Size", LpMinimize)
+    # this setting enables finding a primal feasible solution. If this is false only a lower bound will be computed.
+    opts.incremental_primal_rounding = True
 
-    prob += Size(gaussians.n_point, [variable[f"x{i}"] for i in range(num_variable)], gaussians.n_block, offset) <= model_size_limit
+    # initialize solver
+    solver = bdd_solver(opts)
 
-    for le in range(0, n_group):
-        ri = le * 16 + 16
-        prob += sum([variable[f"x{i}"] for i in range(le * 16, ri)]) == 1
-    print('here')
-    prob += sum([(variable[f"x{i}"]) * L[i] for i in range(num_variable)])
+    # solve dual problem
+    solver.solve_dual()
+    lower_bound = solver.lower_bound()
 
-    time_limit = 200
-    prob.solve(PULP_CBC_CMD(timeLimit=time_limit, msg=True))
+    # run primal heuristic
+    upper_bound, sol = solver.round()
 
-    prob.solve()
+    # extracting the solution as a numpy array
+    sol_numpy = np.array(sol)
+    sol_tensor = torch.tensor(sol).reshape(gaussians.n_channel, gaussians.n_block, 16)
+    # print(sol_numpy)
+    sol_tensor_sum = torch.sum(sol_tensor, dim=-1)
+    print('diff 1', torch.sum(torch.square(sol_tensor_sum - torch.ones_like(sol_tensor_sum))))
 
-    solution = {}
-    for i in range(num_variable):
-        solution[f"x{i}"] = variable[f"x{i}"].varValue
-
-    qbits = np.zeros(gaussians.n_channel, gaussians.n_block)
+    qbits = np.zeros([gaussians.n_channel, gaussians.n_block]).astype(int)
     for i in range(gaussians.n_channel):
         for j in range(gaussians.n_block):
             for k in range(16):
-                if variable[f"x{i*gaussians.n_block*16 + j*16 + k}"].varValue != 0:
+                if sol_numpy[i*gaussians.n_block*16 + j*16 + k] != 0:
                     qbits[i, j] = k+1
-    print('qbits.shape', qbits.shape)
-
-    # logger.info('qbit searching: {}'.format(time.time() - bg))
-    
-    # # gaussians.init_qas(pipe.n_block, qbits)
-    # # gaussians.update_bqa(qbits)
-    
-    minimized_value = prob.objective.value()
-    print("Minimized objective value:", minimized_value)
-
-    # final_percent = purne_percent
+    # print(qbits)
+    # print('qbits.shape', qbits.shape)
     final_qbits = qbits
-
-    
-    
     #debug
     # final_qbits = [8]*73
-    print("final qbits", final_qbits)
+    print("final qbits", np.sum(final_qbits)/gaussians.n_channel/gaussians.n_block)
+    print("final qbits", final_qbits[:10, :10])
 
-    gaussians = GaussianModel(
-        dataset.feat_dim, dataset.n_offsets, 
-        dataset.voxel_size, dataset.update_depth, 
-        dataset.update_init_factor, dataset.update_hierachy_factor, 
-        dataset.use_feat_bank, dataset.appearance_dim, 
-        dataset.ratio, dataset.add_opacity_dist, 
-        dataset.add_cov_dist, dataset.add_color_dist, 
-        dataset.raht, pipe.n_block, dataset.unit_length, 
-        dataset.use_pcc, logger=logger)
-    
-    scene = Scene(dataset, gaussians, load_iteration=load_iteration, shuffle=False)
-    # gaussians.training_setup(opt)
-    all_anchor_size = int(gaussians._anchor.shape[0])
-    
-    with torch.no_grad():
-        if imp is None:
-            gaussians.eval()
-            imp = cal_imp(gaussians, scene.getTrainCameras(), pipe, background)
-            # print(imp.shape)
-        imp = imp.detach()
-        # purne_percent = get_percent(dataset.target_size*1024*1024, best_qbit*73, pipe.n_block, all_anchor_size, offset)
-        purne_percent = 0.6
-        print(purne_percent)
-        pmask = prune_mask(purne_percent, imp)
-        remain_imp = imp[torch.logical_not(pmask)]
-        gaussians.prune_anchor_no_grad(pmask)
-    
-    torch.cuda.empty_cache()
-    
-    if pipe.enable_octree_training is False:
-        gaussians.octree_offline(copy.deepcopy(remain_imp), dataset.oct_merge)
-    
-    # gaussians.octree_init_train()
-    # gaussians.training_setup(opt)
-    # gaussians.octree_train(copy.deepcopy(remain_imp), dataset.oct_merge, raht=dataset.raht)
     gaussians.init_bqa(final_qbits, dp=False)
     gaussians.training_setup(opt)
     gaussians.train()
 
+    logger.info("\n[ITER 0] Saving Gaussians")
+    with torch.no_grad():
+        scene.save_compressed(0)
+    
     iter_start = torch.cuda.Event(enable_timing = True)
     iter_end = torch.cuda.Event(enable_timing = True)
     octree_train_start = torch.cuda.Event(enable_timing = True)
