@@ -1,15 +1,16 @@
 #!/bin/bash
 
 name=bicycle
-iter=1
+iter=2000
 length=1000
 voxel=0.0001
 log=360_v2
-block=20
-size=24
+block=80
+size=30
 time=$(date "+%Y-%m-%d_%H:%M:%S")
 logdir=sizegs_gpcc
 
+SECONDS=0
 CUDA_VISIBLE_DEVICES=1 python meson.py \
     --eval -s /mnt/storage/users/szxie_data/nerf_data/${log}/${name} \
     --lod 0 \
@@ -34,5 +35,9 @@ CUDA_VISIBLE_DEVICES=1 python meson.py \
     --raht \
     --debug \
     --use_pcc \
+    --bit_upper_bound 16 \
+    --bit_lower_bound 1 \
     --load_path outputs/${log}/${name}/baseline/scaffold \
     -m outputs/${log}/${name}/${logdir}/${time}
+duration=$SECONDS
+echo "$((duration / 60)) minutes and $((duration % 60)) seconds elapsed."

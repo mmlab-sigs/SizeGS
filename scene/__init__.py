@@ -124,7 +124,7 @@ class Scene:
     def save_compressed(self, iteration):
         os.makedirs(os.path.join(self.model_path, "zip"), exist_ok=True)
         save_dir = os.path.join(self.model_path, "zip/iteration_{}".format(iteration))
-        save_size = self.gaussians.save_compressed(save_dir)
+        save_size = self.gaussians.save_compressed(save_dir, n_iter=iteration)
         return save_size
 
     def getTrainCameras(self, scale=1.0):

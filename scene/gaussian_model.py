@@ -27,7 +27,7 @@ import time
 
 
 from utils.compression import create_octree, decode_oct, create_octree_train, d1halfing_fast, sorted_voxels, write_ply_geo_ascii, gpcc_encode, gpcc_decode, read_ply_geo_bin, decode_v
-from utils.quant_utils import VanillaQuan, Quant_all, BatchQuant, split_length, seg_quant, seg_quant_forward, seg_quant_reverse, dp_split, pure_quant, quant_reverse, cal_diff_wrapper
+from utils.quant_utils import VanillaQuan, Quant_all, BatchQuant, split_length, seg_quant, seg_quant_forward, seg_quant_reverse, dp_split, pure_quant, quant_reverse, cal_diff_wrapper, pure_quant_wo_minmax
 from raht_torch import copyAsort, haar3D_param, inv_haar3D_param, itransform_batched_torch, transform_batched_torch
 class GaussianModel:
 
@@ -68,6 +68,8 @@ class GaussianModel:
                  use_pcc: bool = False,
                  logger = None,
                  enable_octree_training: bool=False,
+                 bit_upper_bound: int = 16,
+                 bit_lower_bound: int = 1
                  ):
 
         self.feat_dim = feat_dim
@@ -115,6 +117,9 @@ class GaussianModel:
         self.unit_length = unit_length
         self.bqa = None
         self.enable_octree_training = enable_octree_training
+        self.bit_upper_bound = bit_upper_bound
+        self.bit_lower_bound = bit_lower_bound
+        self.n_bit = bit_upper_bound - bit_lower_bound + 1
         
         if self.use_feat_bank:
             self.mlp_feature_bank = nn.Sequential(
@@ -166,7 +171,8 @@ class GaussianModel:
         self.mlp_opacity.train()
         self.mlp_cov.train()
         self.mlp_color.train()
-        self.bqa.train()
+        if self.bqa is not None:
+            self.bqa.train()
         if self.appearance_dim > 0:
             self.embedding_appearance.train()
         if self.use_feat_bank:                   
@@ -549,14 +555,24 @@ class GaussianModel:
         return OC
         
     
-    def apply_quant_forward(self, f):     
-        outputs, scales, zero_points = pure_quant(
-            f,
-            self.dp_split,
-            power_qbits=self.bqa.qbits.to(torch.int32),
-            min_vals=self.bqa.min_vals.detach(),
-            max_vals=self.bqa.max_vals.detach()
-        )
+    def apply_quant_forward(self, f, n_iter=10000):     
+        if n_iter == 0:
+            # print(self.dp_split)
+            # print(self.bqa.qbits)
+            outputs, scales, zero_points = pure_quant_wo_minmax(
+                f,
+                self.dp_split,
+                power_qbits=self.bqa.qbits.to(torch.int32)
+            )
+        else:
+            outputs, scales, zero_points = pure_quant(
+                f,
+                self.dp_split,
+                power_qbits=self.bqa.qbits.to(torch.int32),
+                min_vals=self.bqa.min_vals.detach(),
+                max_vals=self.bqa.max_vals.detach()
+            )
+        # outputs: [C, N]
         trans = torch.concat([scales.reshape(-1), zero_points.reshape(-1)], dim = 0)
         # assert f.shape[0]==sum(splits[0]), "split length is error"
         # for i in range(f.shape[-1]):
@@ -564,6 +580,8 @@ class GaussianModel:
         #     qa_cnt += self.n_block
         #     ret[:, i] = qfi.reshape(-1).cpu()
         #     trans.extend(sz)
+        # n_values = outputs.shape[0] * outputs.shape[1] # [N, C] # maybe right
+        # print('apply_quant_forward, torch.sum(torch.square(outputs - f))', torch.sum(torch.square(outputs - f)) / n_values)
         
         return outputs, trans.cpu().tolist()
     
@@ -590,7 +608,7 @@ class GaussianModel:
         # ret = torch.concat(ret, dim=-1)
         return ret
     
-    def save_compressed(self, save_dir):
+    def save_compressed(self, save_dir, n_iter=10000):
         os.makedirs(save_dir, exist_ok=True)
         bin_dir = os.path.join(save_dir, 'bins')
         os.makedirs(bin_dir, exist_ok=True)
@@ -600,16 +618,24 @@ class GaussianModel:
         
         features = self.apply_raht_forward()
         ff = features[0]
-        qf, sz = self.apply_quant_forward(features[1:])
-        print('qf[0][:10]', qf[0][:10], torch.sum(qf))
+        qf, sz = self.apply_quant_forward(features[1:],n_iter=n_iter)
+        # print('qf[0][:10]', qf[0][:10], torch.sum(qf))
+        # np.save('exp_data/qf.npy', qf.cpu().numpy())
         # print(torch.sum(qf))
+        
+        
         trans.extend(sz)
         cum_split = torch.cumsum(self.dp_split[0].reshape(-1), dim=0).int()
         assert cum_split[-1] == self.n_point - 1, "wrong cum split!"
         
+        # print('fucking cum_split', cum_split)
         # print('self.channel_check[0, 0]', self.channel_check[0, 0])
         qf_8 = []
         qf_16 = []
+        sum_l = 0
+        # print('n_channel', self.n_channel)
+        # print('n_block', self.n_block) 
+        # print('qf.shape', qf.shape)
         for c in range(self.n_channel):
             for b in range(self.n_block):
                 if b == 0:
@@ -617,17 +643,26 @@ class GaussianModel:
                 else:
                     si = int(cum_split[b-1].item())
                 ei = int(cum_split[b].item())
+                # print(si, ei)
                 if self.channel_check[c, b]:
-                    qf_8.append(qf[c, si:ei])
+                    sum_l += int(qf[c, si:ei].shape[-1])
+                    # print(qf[c, si:ei])
+                    qf_8.append(qf[c, si:ei].clone())
                 else:
-                    qf_16.append(qf[c, si:ei])
-
-        qf_8 = torch.concat(qf_8) if qf_8 else torch.tensor([], dtype=torch.uint8)
+                    qf_16.append(qf[c, si:ei].clone())
+        # print(len(qf_8))
+        # print(len(qf_16))
+        # print('len(qf_8[0])', len(qf_8[0]))
+        # print('sum_l', sum_l)
+        qf_8 = torch.concat(qf_8) if qf_8 != [] else torch.tensor([], dtype=torch.uint8)
         qf_8 = qf_8.cpu().numpy().astype(np.uint8)
-        qf_16 = torch.concat(qf_16) if qf_16 else torch.tensor([], dtype=torch.uint16)
+        qf_16 = torch.concat(qf_16) if qf_16 != [] else torch.tensor([], dtype=torch.int)
         qf_16 = qf_16.cpu().numpy().astype(np.uint16)
-        print('qf_8.shape[0]', qf_8.shape[0])
-        print('qf_16.shape[0]', qf_16.shape[0])
+        # print('qf_8.shape[0]', qf_8.shape[0])
+        # print('qf_16.shape[0]', qf_16.shape[0])
+        # np.save('exp_data/qf_8.npy', qf_8)
+        # np.save('exp_data/qf_16.npy', qf_16)
+        # np.save('exp_data/channel_check.npy', self.channel_check.cpu().numpy())
         
         if self.use_pcc:
             tmp_dir = os.path.join(save_dir)
@@ -715,34 +750,52 @@ class GaussianModel:
         self.n_block = int(trans[1])
         
         self.channel_check = attris['h']
-        self.channel = self.channel_check.shape[0]
+        self.n_channel = self.channel_check.shape[0]
         
         ff = torch.tensor(attris['f'], dtype=torch.float32).cuda()
         i_8 = torch.tensor(attris['i_8'], dtype=torch.float32).cuda()
         i_16_np = attris['i_16'].astype(np.int32)
         i_16 = torch.tensor(i_16_np, dtype=torch.float32).cuda()
-        self.n_point = ff.shape[0]
-        splits = split_length(self.n_point, self.n_block)
+        # print('i_8.shape', i_8.shape)
+        # print('i_16.shape)', i_16.shape)
+        self.n_point = voxelized_means.shape[0]
+        # print('self.n_point', self.n_point)
+        splits = split_length(self.n_point - 1, self.n_block) # [B]
+        splits = [splits] * self.n_channel # [C, B] list 
+        # print('splits', splits)
+        # print('splits', len(splits), len(splits[0]))
+        # self.dp_split = torch.tensor(splits, device="cuda",)
         # cum_split = torch.cumsum(torch.tensor(splits)).int()
+        # f = open('exp_data/idx816.txt', 'w')
         qf = []
         idx8 = 0
         idx16 = 0
+        # print('self.n_channel', self.n_channel)
         for c in range(self.n_channel):
             cq = []
             ci = 0
             for b in range(self.n_block):
-                glen = splits[c, b]
-                if self.channel_check[c, b] is True:
+                glen = splits[c][b]
+                if self.channel_check[c, b]:
                     cq.append(i_8[idx8:idx8+glen])
                     idx8 += glen 
                 else:
                     cq.append(i_16[idx16:idx16+glen])
                     idx16 += glen 
                 ci += glen 
-            cq = torch.concat(cq).reshape(-1, 1)
+                # f.write(f'{idx8} {idx16}\n')
+            cq = torch.concat(cq, dim=-1).reshape(1, -1) # [1, N-1]
+            # print('cq.shape', cq.shape)
             qf.append(cq)
-        qf = torch.concat(qf, dim=1).cuda()
+        # f.close()
+        # print('idx8', idx8)
+        # print('idx16', idx16)
+        # print(len(qf), type(qf[0]), qf[0].shape)
+        qf = torch.concat(qf, dim=0).cuda().transpose(0, 1)
+        # print(qf.shape) # must be [N-1, C]
+        
         assert qf.shape[0] == self.n_point - 1, "false qf length"
+        self.dp_split = torch.tensor(splits, device="cuda", dtype=torch.int)
         dqf = self.apply_quant_reverse(qf, trans, 2)
         fe = torch.concat([ff.reshape(1, -1), dqf], dim=0)
         
@@ -889,8 +942,8 @@ class GaussianModel:
         
         
 
-    def init_bqa(self, qbits: np.ndarray, dp: bool = False):
-        qbits = torch.tensor(qbits, device="cuda", dtype=int)
+    def init_bqa(self, qbits: torch.Tensor, dp: bool = False):
+        # qbits = torch.tensor(qbits, device="cuda", dtype=int)
         self.bqa = BatchQuant(self.n_channel, self.n_block, qbits, self.dp_split).cuda()
         
         channel_check = qbits <= 8
@@ -907,7 +960,6 @@ class GaussianModel:
         #         low_bit_channels.append(i)
         # self.high_bit_channels = high_bit_channels
         # self.low_bit_channels = low_bit_channels
-        
         
         # if dp == False:
         #     if self.raht:
@@ -1979,7 +2031,7 @@ class GaussianModel:
         print('get_fine_grained_ddrf self.n_channel', self.n_channel)
         # [[int(j)] * self.n_channel]*self.n_block
         with torch.no_grad():
-            for j in range(1, 17):
+            for j in range(self.bit_lower_bound, self.bit_upper_bound + 1):
                 out = cal_diff_wrapper(
                     channel_num = self.n_channel,
                     block_num = self.n_block,
@@ -1987,16 +2039,20 @@ class GaussianModel:
                     splits = splits,
                     qbits = torch.ones([self.n_channel, self.n_block], device="cuda")*j,
                 )
+                # pure_quant(
+                    
+                # )
                 torch.cuda.synchronize()
                 A.append(out.clone())
-        A = torch.stack(A) # [16, C, B]
+        A = torch.stack(A) # [n_bit, C, B]
+        B = torch.sum(A, dim=-1).transpose(0, 1) # [C, n_bit]
         np.save('exp_data/A.npy', A.cpu().numpy())
-        A = A.permute(1, 2, 0) # [C, B, 16]
+        A = A.permute(1, 2, 0) # [C, B, n_bit]
         
         self.logger.info('gaussian model get fg ddrf A sum {}'.format(torch.sum(A)))
-        A_flat = A.flatten().cpu().tolist()  # 将展平后的张量转为 Python 列表
-
-        return A_flat
+        # A_flat = A.flatten().cpu().tolist()  # 将展平后的张量转为 Python 列表
+        B_flat = B.flatten().cpu().tolist()
+        return A, B_flat
 
     # quantC = torch.zeros_like(C)
     # quantC[0] = C[0]

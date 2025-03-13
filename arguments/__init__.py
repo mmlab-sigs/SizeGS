@@ -85,7 +85,8 @@ class ModelParams(ParamGroup):
         self.raht = False
         self.use_pcc = False
         self.unit_length = 1000
-        
+        self.bit_upper_bound = 16
+        self.bit_lower_bound = 1
         super().__init__(parser, "Loading Parameters", sentinel)
 
     def extract(self, args):
@@ -106,6 +107,8 @@ class PipelineParams(ParamGroup):
 class OptimizationParams(ParamGroup):
     def __init__(self, parser):
         self.iterations = 30_000
+        self.prune_iterations = 1000
+        self.octree_iterations = 1000
         self.position_lr_init = 0
         self.position_lr_final = 0
         self.position_lr_delay_mult = 0.01

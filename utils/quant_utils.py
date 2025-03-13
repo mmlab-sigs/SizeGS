@@ -486,13 +486,21 @@ def pure_quant(
         min_vals: torch.Tensor, 
         max_vals: torch.Tensor
     ):
-    
+    '''
+    inputs: [N, C],
+    outputs: [C, N]
+    '''
     inputs = inputs.transpose(0, 1).contiguous() 
     cum_splits = torch.cumsum(splits, dim=1).int().contiguous()
     min_vals = min_vals.contiguous()
     max_vals = max_vals.contiguous()
     power_qbits = power_qbits.contiguous()
-    outputs = torch.zeros_like(inputs).contiguous() 
+    # print('power_qbits', power_qbits) # seems ok
+    # print('min_vals', min_vals) # seems ok
+    # print('max_vals', max_vals) # seems ok
+    # print('cum_splits', cum_splits) # ?
+    
+    outputs = torch.zeros_like(inputs).int().contiguous() 
     scales = torch.zeros_like(min_vals).contiguous() 
     zero_points = torch.zeros_like(min_vals).contiguous() 
     
@@ -511,7 +519,35 @@ def pure_quant(
         zero_points
     )
     torch.cuda.synchronize()
-    return outputs.transpose(0, 1), scales, zero_points
+    return outputs, scales, zero_points
+
+def pure_quant_wo_minmax(
+        inputs: torch.Tensor, 
+        splits: torch.Tensor, 
+        power_qbits: torch.Tensor
+    ):
+    '''
+    inputs: [N, C],
+    outputs: [C, N]
+    '''
+    inputs = inputs.transpose(0, 1).contiguous() 
+    cum_splits = torch.cumsum(splits, dim=1).int().contiguous()
+    power_qbits = power_qbits.contiguous()
+    outputs = torch.zeros_like(inputs).int().contiguous() 
+    scales = torch.zeros_like(cum_splits).float().contiguous() 
+    zero_points = torch.zeros_like(cum_splits).float().contiguous() 
+    
+    segquant.quant_forward_wo_minmax(
+        inputs, 
+        cum_splits,
+        power_qbits,
+        outputs,
+        scales,
+        zero_points
+    )
+    torch.cuda.synchronize()
+    return outputs, scales, zero_points
+
 
 def quant_reverse(
         inputs: torch.Tensor, 

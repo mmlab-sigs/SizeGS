@@ -51,9 +51,9 @@ __global__ void quant_kernel(
         float scale = 1.0f;
         if (min_val != max_val) {
             scale = (max_val - min_val) / (qmax - 0.);
-            if (scale < 1e-12f) {
-                scale = 1e-12f;  // 或根据需求调整
-            }
+            // if (scale < 1e-12f) {
+            //     scale = 1e-12f;  // 或根据需求调整
+            // }
         } 
         
         float zero_point = qmax - max_val / scale;
@@ -85,7 +85,7 @@ __global__ void quant_forward_kernel(
     const int * __restrict__ power_qbits, 
     float* min_vals,
     float* max_vals,
-    float* out,
+    int* out,
     float* scales,
     float* zero_points
 ) {
@@ -105,7 +105,7 @@ __global__ void quant_forward_kernel(
         int quant_length = end_idx - start_idx;
         float tmp = 0;
         const float* features_ptr = features + c * N + start_idx;
-        float* out_ptr = out + c * N + start_idx;
+        int* out_ptr = out + c * N + start_idx;
         
         float scale = 1.0f;
         if (min_val != max_val) {
@@ -129,7 +129,7 @@ __global__ void quant_forward_kernel(
         // min_vals[idx] = min_val;
         // max_vals[idx] = max_val;
         scales[idx] = scale;
-        zero_points[idx] = scale;
+        zero_points[idx] = zero_point;
     }
 }
 
@@ -216,7 +216,7 @@ void quant_forward(
         power_qbits.data_ptr<int>(),
         min_vals.data_ptr<float>(),
         max_vals.data_ptr<float>(),
-        out.data_ptr<float>(),
+        out.data_ptr<int>(),
         scales.data_ptr<float>(),
         zero_points.data_ptr<float>()
     );
@@ -294,9 +294,9 @@ __global__ void cal_diff_kernel(
         float scale = 1.0f;
         if (min_val != max_val) {
             scale = (max_val - min_val) / (qmax - 0.);
-            if (scale < 1e-12f) {
-                scale = 1e-12f;  // 或根据需求调整
-            }
+            // if (scale < 1e-12f) {
+            //     scale = 1e-12f;  // 或根据需求调整
+            // }
         } 
         
         float zero_point = qmax - max_val / scale;
@@ -343,6 +343,101 @@ void cal_diff(
         min_vals.data_ptr<float>(),
         max_vals.data_ptr<float>(),
         out_diff.data_ptr<float>()
+    );
+}
+
+
+__global__ void quant_forward_wo_minmax_kernel(
+    const int C,
+    const int N,
+    const int B,
+    const float * __restrict__ features, 
+    const int * __restrict__ splits, 
+    const int * __restrict__ power_qbits, 
+    int* out,
+    float* scales,
+    float* zero_points
+) {
+    int idx = threadIdx.x + blockIdx.x * blockDim.x;
+    if (idx < B * C) {
+        int c = idx / B;
+        int start_idx = 0;
+        if (idx > 0) {
+            start_idx = splits[idx - 1];
+        }
+        int end_idx = splits[idx];
+        float qmax = power_qbits[idx];
+        
+        int quant_length = end_idx - start_idx;
+        float tmp = 0;
+        const float* features_ptr = features + c * N + start_idx;
+        int* out_ptr = out + c * N + start_idx;
+        
+        float min_val = features_ptr[0];
+        float max_val = features_ptr[0];
+
+        for (int i = 0; i < quant_length; i++) {
+            tmp = features_ptr[i];
+            if (tmp < min_val) {
+                min_val = tmp;
+            }
+            if (tmp > max_val) {
+                max_val = tmp;
+            }
+        }
+
+        if (min_val > 0) {
+            min_val = 0;
+        }
+        if (max_val < 0) {
+            max_val = 0;
+        }
+
+        float scale = 1.0f;
+        if (min_val != max_val) {
+            scale = (max_val - min_val) / (qmax - 0.);
+        }
+        
+        float zero_point = qmax - max_val / scale;
+        if (zero_point < 0.0f) {
+            zero_point = 0.0f;
+        } else if (zero_point > qmax) {
+            zero_point = qmax;
+        }
+        zero_point = roundf(zero_point);
+
+        for (int i = 0; i < quant_length; i++) {
+            float q = zero_point + (features_ptr[i] / scale);
+            out_ptr[i] = roundf(fminf(fmaxf(q, 0), qmax)); // save value to out features
+        }
+
+        scales[idx] = scale;
+        zero_points[idx] = zero_point;
+    }
+}
+
+void quant_forward_wo_minmax(
+    const torch::Tensor& features,
+    const torch::Tensor& splits,
+    const torch::Tensor& power_qbits,
+    torch::Tensor& out,
+    torch::Tensor& scales,
+    torch::Tensor& zero_points
+) {
+    const int C = features.size(0);
+    const int N = features.size(1);
+    const int B = splits.size(1);
+
+    quant_forward_wo_minmax_kernel <<<ceil(C * B / 256.0), 256>>>(
+        C, 
+        N,
+        B,
+        features.data_ptr<float>(),
+        splits.data_ptr<int>(),
+        power_qbits.data_ptr<int>(),
+        out.data_ptr<int>(),
+        scales.data_ptr<float>(),
+        zero_points.data_ptr<float>()
     );
 }
 

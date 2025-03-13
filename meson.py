@@ -140,14 +140,49 @@ def get_percent(target_size, qbit, n_block, anchor_size, offset):
     n = int((target_size - 50*1024 - 4*n_block - offset*1024*1024)*8 - 73*32 - 73*n_block*32*2 - 2*32 - n_block*32 + qbit)/(qbit+64)
     return (anchor_size - n)/anchor_size
 
-def newSize(n, n_block, target_size, offset):
+def newSize(n, n_block, target_size, offset=0):
     remain = (73*32 + n*64 + 73*n_block*32*2 + 2*32 )/8 + 50*1024 + offset*1024*1024
     # Todo: rewrite the new Size function.
     # return qbits < ?
-    return target_size - remain 
+    return (target_size - remain) * 8 # bit
     
+def qbit_upper_size(n_point, n_channel, n_block, target_size):
+    trans_size = n_channel * n_block * 2 * 32 + 2 * 32 # scale and zero points, n_block, depth
+    channel_check = n_channel * n_block * 8
+    oct_param = 6 * 32
+    dc_size = n_channel * 32 # DC coefficient
+    oct_size = n_point * 64 # octree size 
+    mlp_size = 50*1024
+    remain_size = mlp_size * 8 + trans_size + channel_check + oct_param + dc_size + oct_size
+
+    return target_size - remain_size, remain_size # bit
+
+def per_channel_qbit_upper(cha_qbits, qbit_size_limit):
+    qbitsum = sum(cha_qbits)
+    elem = qbit_size_limit / qbitsum 
+    per_channel_uppers = []
+    for bi in cha_qbits:
+        per_channel_uppers.append(bi * elem)
+    return per_channel_uppers
+
+def qbit_channel_size_estimator(qbits, n_point, n_bit, low_bit, n_channel, remain_size):
+    qbsum = 0
+    for i in range(n_channel):
+        for j in range(n_bit):
+            qbsum += qbits[i*n_bit + j] * (j + low_bit)
     
-def create_ilp_problem(L, n_bit, n_channel, n_block, splits, qbit_size):
+    return remain_size + qbsum * (n_point - 1) # bit
+
+def qbit_block_size_esimator(qbits, n_bit, low_bit, splits):
+    # qbits: [0 or 1]
+    qbsz = 0
+    for i, si in enumerate(splits):
+        for j in range(n_bit):
+            qbsz += si * qbits[i*16 + j] * (j + low_bit)
+    
+    return qbsz # bit
+
+def solve_finer_01_ilp_problem(L, n_bit, low_bit, n_channel, n_block, splits, qbit_size):
     n_variable = n_bit * n_channel * n_block
     objective = {}
     size_coni = {}
@@ -157,13 +192,20 @@ def create_ilp_problem(L, n_bit, n_channel, n_block, splits, qbit_size):
         cbi = int(i // n_bit)
         ci = int(cbi // n_block) 
         bi = int(cbi % n_block)
-        size_coni[f"x{i}"] = re * int(splits[ci, bi].item())
+        coni_arg = re * int(splits[ci, bi].item()) / 8
+        size_coni[f"x{i}"] = coni_arg
         
     constraints = []
     # TODO: add size constraint
     # n_cons = 1
+    constraints.append([
+        f'C1',
+        size_coni,
+        '<',
+        qbit_size
+    ])
     for i in range(n_channel * n_block):
-        coni = [f'C{i+1}']
+        coni = [f'C{i+2}']
         coni_dict = {}
         for j in range(n_bit):
             coni_dict[f"x{i*n_bit+j}"] = 1.0
@@ -172,13 +214,6 @@ def create_ilp_problem(L, n_bit, n_channel, n_block, splits, qbit_size):
         coni.append(1.0)
         # print(coni)
         constraints.append(coni)
-    
-    constraints.append([
-        f'C{n_channel * n_block + 1}',
-        size_coni,
-        '<',
-        qbit_size
-    ])
     
     # objective = {'x1': 2.0, 'x2': 1.0, 'x3': -1.0, 'x4': 1.0, 'x5': -2.0, 'x6': -5.0}
     # constraints = [
@@ -205,8 +240,176 @@ def create_ilp_problem(L, n_bit, n_channel, n_block, splits, qbit_size):
             assert(con_sense == '>')
             ineq_type = ilp_instance.greater_equal
         ilp.add_new_constraint(con_name, con_vars, con_coeffs, rhs_value, ineq_type)
-    return ilp
+    
+    # passing ilp instance to solver options
+    opts = bdd_solver_options(ilp)
+    # this setting enables finding a primal feasible solution. If this is false only a lower bound will be computed.
+    opts.incremental_primal_rounding = True
+    # initialize solver
+    solver = bdd_solver(opts)
+    # solve dual problem
+    solver.solve_dual()
+    lower_bound = solver.lower_bound()
+    # run primal heuristic
+    upper_bound, sol = solver.round()
+    # extracting the solution as a numpy array
+    sol_numpy = np.array(sol)
+    
+    sol_tensor = torch.tensor(sol).reshape(n_channel, n_block, n_bit)
+    # print(sol_numpy)
+    sol_tensor_sum = torch.sum(sol_tensor, dim=-1)
+    # print('diff 1', torch.sum(torch.square(sol_tensor_sum - torch.ones_like(sol_tensor_sum))))
 
+    qbits = np.zeros([n_channel, n_block]).astype(int)
+    for i in range(n_channel):
+        for j in range(n_block):
+            for k in range(n_bit):
+                if sol_numpy[i*n_block*n_bit + j*n_bit + k] != 0:
+                    qbits[i, j] = k+low_bit
+                    
+    return qbits
+
+def solve_coarse_01_ilp_problem(L, n_bit, low_bit, n_channel, n_point, qbit_size):
+    n_variable = n_bit * n_channel
+    objective = {}
+    size_coni = {}
+    assert len(L) == n_variable, "false L length"
+    for i in range(n_variable):
+        objective[f"x{i}"] = L[i]
+        re = (i % n_bit) + 1
+        coni_arg = re * (n_point - 1)
+        size_coni[f"x{i}"] = coni_arg
+        
+    constraints = []
+    constraints.append([
+        f'C1',
+        size_coni,
+        '<',
+        qbit_size
+    ])
+    # TODO: add size constraint
+    # n_cons = 1
+    for i in range(n_channel):
+        coni = [f'C{i+2}']
+        coni_dict = {}
+        for j in range(n_bit):
+            coni_dict[f"x{i*n_bit+j}"] = 1
+        coni.append(coni_dict)
+        coni.append('=')
+        coni.append(1)
+        # print(coni)
+        constraints.append(coni)
+    
+    ilp = ilp_instance.ILP_instance()
+    for var_name, coeff in objective.items():
+        ilp.add_new_variable_with_obj(var_name, coeff)
+
+    for con in constraints:
+        con_name = con[0]
+        con_vars = list(con[1].keys())
+        con_coeffs = list(con[1].values())
+        con_coeffs = [int(c) for c in con_coeffs] # Only integer coefficients are supported.
+        con_sense = con[2]
+        rhs_value = int(con[3]) # Only integer right hand side value is supported.
+        if con_sense == '=':
+            ineq_type = ilp_instance.equal
+        elif con_sense == '<':
+            ineq_type = ilp_instance.smaller_equal
+        else:
+            assert(con_sense == '>')
+            ineq_type = ilp_instance.greater_equal
+        ilp.add_new_constraint(con_name, con_vars, con_coeffs, rhs_value, ineq_type)
+    
+    # passing ilp instance to solver options
+    opts = bdd_solver_options(ilp)
+    # this setting enables finding a primal feasible solution. If this is false only a lower bound will be computed.
+    opts.incremental_primal_rounding = True
+    # initialize solver
+    solver = bdd_solver(opts)
+    # solve dual problem
+    solver.solve_dual()
+    lower_bound = solver.lower_bound()
+    # run primal heuristic
+    upper_bound, sol = solver.round()
+    # extracting the solution as a numpy array
+    sol_numpy = np.array(sol)
+    
+    sol_tensor = torch.tensor(sol).reshape(n_channel, n_bit)
+    # print(sol_numpy)
+    sol_tensor_sum = torch.sum(sol_tensor, dim=-1)
+    # print('diff 1', torch.sum(torch.square(sol_tensor_sum - torch.ones_like(sol_tensor_sum))))
+
+    qbits = np.zeros(n_channel).astype(int)
+    for i in range(n_channel):
+        for k in range(n_bit):
+            if sol_numpy[i*n_bit + k] != 0:
+                qbits[i] = k+low_bit
+    
+    return qbits
+
+def solve_coarase_ilp_pulp(L, n_bit, low_bit, n_channel, n_block, n_point, qbit_size_limit):
+    num_variable = n_channel * n_bit 
+    variable = {}
+    for i in range(num_variable):
+        variable[f"x{i}"] = LpVariable(f"x{i}", 0, 1, cat=LpInteger)
+    prob = LpProblem("Model_Size", LpMinimize)
+
+    prob += qbit_channel_size_estimator([variable[f"x{i}"] for i in range(num_variable)], n_point, n_bit, low_bit, n_channel, 0) <= qbit_size_limit
+
+    for le in range(0, n_channel):
+        ri = le * n_bit + n_bit
+        prob += sum([variable[f"x{i}"] for i in range(le * n_bit, ri)]) == 1
+
+    prob += sum([(variable[f"x{i}"]) * L[i] for i in range(num_variable)])
+
+    time_limit = 200
+
+    # 使用CBC求解器并设置时间限制
+    prob.solve(PULP_CBC_CMD(timeLimit=time_limit, msg=True))
+
+    solution = {}
+    for i in range(num_variable):
+        solution[f"x{i}"] = variable[f"x{i}"].varValue
+
+    qbits = [0]*n_channel
+    for i in range(n_channel):
+        for j in range(n_bit):
+            if variable[f"x{i*n_bit+j}"].varValue != 0:
+                qbits[i] = j+low_bit 
+    
+    return qbits
+
+def solve_channel_ilp_pulp(L, n_bit, low_bit, n_block, n_point, splits, model_size_limit):
+    num_variable = n_block * n_bit 
+    variable = {}
+    for i in range(num_variable):
+        variable[f"x{i}"] = LpVariable(f"x{i}", 0, 1, cat=LpInteger)
+    prob = LpProblem("Model_Size", LpMinimize)
+
+    prob += qbit_block_size_esimator([variable[f"x{i}"] for i in range(num_variable)], n_bit, low_bit, splits) <= model_size_limit
+
+    for le in range(0, n_block):
+        ri = le * n_bit + n_bit
+        prob += sum([variable[f"x{i}"] for i in range(le * n_bit, ri)]) == 1
+
+    prob += sum([(variable[f"x{i}"]) * L[i] for i in range(num_variable)])
+
+    time_limit = 200
+
+    # 使用CBC求解器并设置时间限制
+    prob.solve(PULP_CBC_CMD(timeLimit=time_limit, msg=True))
+
+    solution = {}
+    for i in range(num_variable):
+        solution[f"x{i}"] = variable[f"x{i}"].varValue
+
+    qbits = [0]*n_block
+    for i in range(n_block):
+        for j in range(n_bit):
+            if variable[f"x{i*n_bit+j}"].varValue != 0:
+                qbits[i] = j+low_bit 
+    
+    return qbits
 
 def training(dataset, opt, pipe, dataset_name, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from, load_iteration, wandb=None, logger=None, ply_path=None):
     first_iter = 0
@@ -239,7 +442,7 @@ def training(dataset, opt, pipe, dataset_name, testing_iterations, saving_iterat
         if imp is None:
             gaussians.eval()
             imp = cal_imp(gaussians, scene.getTrainCameras(), pipe, background)
-            print(imp.shape)
+            # print(imp.shape)
         imp = imp.detach()
         # purne_percent = get_percent(dataset.target_size*1024*1024, best_qbit*73, pipe.n_block, all_anchor_size, offset)
         purne_percent = 0.6
@@ -249,73 +452,221 @@ def training(dataset, opt, pipe, dataset_name, testing_iterations, saving_iterat
         gaussians.prune_anchor_no_grad(pmask)
     logger.info('cal imp: {}'.format(time.time() - bg))
     
+    
+    # start after-pruning warm up
+    gaussians.training_setup(opt)
+    gaussians.train()
+    
+    bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
+    background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
+    
+    writer = SummaryWriter(log_dir='runs/testing')
+    offset_iteration = 0
+    viewpoint_stack = None
+    iter_start = torch.cuda.Event(enable_timing = True)
+    iter_end = torch.cuda.Event(enable_timing = True)
+    
+    
+    ema_loss_for_log = 0.0
+    first_iter = 0
+    progress_bar = tqdm(range(first_iter, opt.prune_iterations), desc="prune warm progress")
+    first_iter += 1
+    # dp=False
+    logger.info("start prune warm up training")
+    
+    # warm up
+    for iteration in range(first_iter, opt.prune_iterations+1):
+        iter_start.record()
+        gaussians.optimizer.zero_grad()
+        gaussians.update_learning_rate(iteration)
+        
+        if not viewpoint_stack:
+            viewpoint_stack = scene.getTrainCameras().copy()
+        viewpoint_cam = viewpoint_stack.pop(randint(0, len(viewpoint_stack)-1))
+        
+        voxel_visible_mask = prefilter_voxel(viewpoint_cam, gaussians, pipe, background, training=True)
+                
+        render_pkg = render(
+            viewpoint_cam,
+            gaussians,
+            pipe,
+            background,
+            visible_mask=voxel_visible_mask, 
+            retain_grad=False
+        )
+        image, scaling = render_pkg["render"], render_pkg["scaling"]
+        gt_image = viewpoint_cam.original_image.cuda()
+        Ll1 = l1_loss(image, gt_image)
+
+        ssim_loss = (1.0 - ssim(image, gt_image))
+        scaling_reg = scaling.prod(dim=1).mean()
+        loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * ssim_loss + 0.01*scaling_reg
+        loss.backward()
+        
+        torch.cuda.synchronize()
+        torch.cuda.empty_cache()
+        
+        iter_end.record()
+        
+        with torch.no_grad():
+            # Progress bar
+            ema_loss_for_log = 0.4 * loss.item() + 0.6 * ema_loss_for_log
+
+            if iteration % 10 == 0:
+                progress_bar.set_postfix({"Loss": f"{ema_loss_for_log:.{7}f}"})
+                progress_bar.update(10)
+            if iteration == opt.prune_iterations:
+                progress_bar.close()
+
+            # Log and save
+            training_report(tb_writer, dataset_name, iteration, Ll1, loss, l1_loss, iter_start.elapsed_time(iter_end), testing_iterations, scene, render, (pipe, background), wandb, logger)
+                    
+            # Optimizer step
+            if iteration < opt.prune_iterations:
+                gaussians.optimizer.step()
+                gaussians.optimizer.zero_grad(set_to_none = True)
+
+        writer.add_scalar('training loss', loss.item(), iteration + offset_iteration)
+    offset_iteration += opt.prune_iterations
+    
+    # disable anchor update 
     if not pipe.enable_octree_training:
         gaussians.octree_offline(remain_imp.clone(), dataset.oct_merge)
 
-    model_size_limit = dataset.target_size*1024*1024
-    num_variable = gaussians.n_channel * gaussians.n_block * 16
-
-    L = gaussians.get_fine_grained_ddrf()
-    assert len(L) == num_variable, "Length of L does not match number of variables."
+    # start after-octree warm up
+    gaussians.training_setup(opt)
+    gaussians.train()
     
-    qbit_upper_size = newSize(gaussians.n_point, gaussians.n_block, model_size_limit, offset=offset)
-    print('qbit_upper_size', qbit_upper_size)
-    ilp = create_ilp_problem(
-        L,
-        n_bit = 16,
-        n_channel = gaussians.n_channel,
-        n_block = gaussians.n_block,
-        splits = gaussians.dp_split,
-        qbit_size = qbit_upper_size
-    )
+    bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
+    background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
+    
+    ema_loss_for_log = 0.0
+    first_iter = 0
+    progress_bar = tqdm(range(first_iter, opt.octree_iterations), desc="Octree warm up progress")
+    first_iter += 1
+    
+    # warm up
+    for iteration in range(1, opt.octree_iterations+1):
+        gaussians.optimizer.zero_grad()
+        gaussians.update_learning_rate(iteration)
+        
+        if not viewpoint_stack:
+            viewpoint_stack = scene.getTrainCameras().copy()
+        viewpoint_cam = viewpoint_stack.pop(randint(0, len(viewpoint_stack)-1))
+        
+        voxel_visible_mask = prefilter_voxel(viewpoint_cam, gaussians, pipe, background, training=True)
+                
+        render_pkg = render(
+            viewpoint_cam,
+            gaussians,
+            pipe,
+            background,
+            visible_mask=voxel_visible_mask, 
+            retain_grad=False
+        )
+        image, scaling = render_pkg["render"], render_pkg["scaling"]
+        gt_image = viewpoint_cam.original_image.cuda()
+        Ll1 = l1_loss(image, gt_image)
 
-    # passing ilp instance to solver options
-    opts = bdd_solver_options(ilp)
+        ssim_loss = (1.0 - ssim(image, gt_image))
+        scaling_reg = scaling.prod(dim=1).mean()
+        loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * ssim_loss + 0.01*scaling_reg
+        loss.backward()
+        
+        torch.cuda.synchronize()
+        torch.cuda.empty_cache()
+        
+        with torch.no_grad():
+            # Progress bar
+            ema_loss_for_log = 0.4 * loss.item() + 0.6 * ema_loss_for_log
 
-    # this setting enables finding a primal feasible solution. If this is false only a lower bound will be computed.
-    opts.incremental_primal_rounding = True
+            if iteration % 10 == 0:
+                progress_bar.set_postfix({"Loss": f"{ema_loss_for_log:.{7}f}"})
+                progress_bar.update(10)
+            if iteration == opt.octree_iterations:
+                progress_bar.close()
 
-    # initialize solver
-    solver = bdd_solver(opts)
+            # Log and save
+            training_report(tb_writer, dataset_name, iteration, Ll1, loss, l1_loss, iter_start.elapsed_time(iter_end), testing_iterations, scene, render, (pipe, background), wandb, logger)
+                    
+            # Optimizer step
+            if iteration < opt.octree_iterations:
+                gaussians.optimizer.step()
+                gaussians.optimizer.zero_grad(set_to_none = True)
+        writer.add_scalar('training loss', loss.item(), iteration + offset_iteration)
+    
+    offset_iteration += opt.octree_iterations
+    
+    model_size_limit = dataset.target_size*1024*1024*8
+    num_variable = gaussians.n_channel * gaussians.n_block * gaussians.n_bit
 
-    # solve dual problem
-    solver.solve_dual()
-    lower_bound = solver.lower_bound()
-
-    # run primal heuristic
-    upper_bound, sol = solver.round()
-
-    # extracting the solution as a numpy array
-    sol_numpy = np.array(sol)
-    sol_tensor = torch.tensor(sol).reshape(gaussians.n_channel, gaussians.n_block, 16)
-    # print(sol_numpy)
-    sol_tensor_sum = torch.sum(sol_tensor, dim=-1)
-    print('diff 1', torch.sum(torch.square(sol_tensor_sum - torch.ones_like(sol_tensor_sum))))
-
-    qbits = np.zeros([gaussians.n_channel, gaussians.n_block]).astype(int)
-    for i in range(gaussians.n_channel):
-        for j in range(gaussians.n_block):
-            for k in range(16):
-                if sol_numpy[i*gaussians.n_block*16 + j*16 + k] != 0:
-                    qbits[i, j] = k+1
+    A, B = gaussians.get_fine_grained_ddrf()
+    td = True
+    if td:
+        br = time.time()
+        
+        # print(A.shape)
+        # print(len(B))
+        # assert len(A) == num_variable, "Length of L does not match number of variables."
+        
+        # qbit_upper_size = newSize(gaussians.n_point, gaussians.n_block, model_size_limit, offset=offset)
+        # print('qbit_upper_size', qbit_upper_size)
+        # bit
+        qbit_size_limit, remain_size = qbit_upper_size(gaussians.n_point, gaussians.n_channel, gaussians.n_block, model_size_limit)
+        
+        cha_qbits = solve_coarase_ilp_pulp(
+            B,
+            n_bit = gaussians.n_bit,
+            low_bit = gaussians.bit_lower_bound,
+            n_channel = gaussians.n_channel,
+            n_block = gaussians.n_block,
+            n_point = gaussians.n_point,
+            qbit_size_limit = qbit_size_limit
+        )
+        
+        # print(cha_qbits)
+        per_channel_size_limit = per_channel_qbit_upper(cha_qbits, qbit_size_limit)
+        
+        final_qbits = []
+        for i, pc_szlmit in enumerate(per_channel_size_limit):
+            per_block_qbits = solve_channel_ilp_pulp(
+                L=A[i].flatten().cpu().tolist(),
+                n_bit=gaussians.n_bit,
+                low_bit=gaussians.bit_lower_bound,
+                n_block=gaussians.n_block,
+                n_point=gaussians.n_point,
+                splits=gaussians.dp_split[i].reshape(-1).cpu().tolist(),
+                model_size_limit=pc_szlmit
+            )
+            final_qbits.append(torch.tensor(per_block_qbits, device="cuda", dtype=int))
+        final_qbits = torch.stack(final_qbits)
+        np.save('exp_data/final_qbits.npy', final_qbits.cpu().numpy())
+        logger.info('searching time: {}'.format(time.time() - br))
+    else:
+        final_qbits = torch.tensor(np.load('exp_data/final_qbits.npy'), device="cuda", dtype=int)
+    
+    # np.save('exp_data/final_qbits.npy', final_qbits.cpu().numpy())
+    # print(final_qbits)
+    # print('cha_qbits', cha_qbits)
+    # exit(0)
+    # print('cha_qbits', cha_qbits)
     # print(qbits)
     # print('qbits.shape', qbits.shape)
-    final_qbits = qbits
+    # final_qbits = cha_qbits
+    
     #debug
     # final_qbits = [8]*73
-    print("final qbits", np.sum(final_qbits)/gaussians.n_channel/gaussians.n_block)
-    print("final qbits", final_qbits[:10, :10])
+    # print("final qbits", np.sum(final_qbits)/gaussians.n_channel/gaussians.n_block)
+    # print("final qbits", final_qbits[:10, :10])
 
-    gaussians.init_bqa(final_qbits, dp=False)
+    gaussians.init_bqa(final_qbits)
     gaussians.training_setup(opt)
     gaussians.train()
 
     logger.info("\n[ITER 0] Saving Gaussians")
     with torch.no_grad():
         scene.save_compressed(0)
-    
-    iter_start = torch.cuda.Event(enable_timing = True)
-    iter_end = torch.cuda.Event(enable_timing = True)
+
     octree_train_start = torch.cuda.Event(enable_timing = True)
     octree_train_end = torch.cuda.Event(enable_timing = True)
     change_dp_start = torch.cuda.Event(enable_timing = True)
@@ -325,14 +676,17 @@ def training(dataset, opt, pipe, dataset_name, testing_iterations, saving_iterat
     loss_best = 0.05
     best_iteration = 0
 
-    writer = SummaryWriter(log_dir='runs/testing')
-    viewpoint_stack = None
+    # writer = SummaryWriter(log_dir='runs/testing')
+    # viewpoint_stack = None
     ema_loss_for_log = 0.0
+    first_iter = 0
     progress_bar = tqdm(range(first_iter, opt.iterations), desc="Training progress")
     first_iter += 1
     # dp=False
     logger.info("start Training")
     
+    bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
+    background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
     
     for iteration in range(first_iter, opt.iterations + 1):
         
@@ -355,8 +709,7 @@ def training(dataset, opt, pipe, dataset_name, testing_iterations, saving_iterat
         # gaussians.change_dp_split(dp=dp)
         # change_dp_end.record()
         
-        bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
-        background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
+        
         # Pick a random Camera
         if not viewpoint_stack:
             viewpoint_stack = scene.getTrainCameras().copy()
@@ -366,9 +719,9 @@ def training(dataset, opt, pipe, dataset_name, testing_iterations, saving_iterat
         if (iteration - 1) == debug_from:
             pipe.debug = True
         
-        prefilter_voxel_start.record()
+        # prefilter_voxel_start.record()
         voxel_visible_mask = prefilter_voxel(viewpoint_cam, gaussians, pipe, background, training=True)
-        prefilter_voxel_end.record()
+        # prefilter_voxel_end.record()
         retain_grad = (iteration < opt.update_until and iteration >= 0)
         # visible_mask = torch.ones(gaussians.get_anchor_v.shape[0], dtype=torch.bool, device = gaussians.get_anchor_v.device)
         
@@ -389,7 +742,7 @@ def training(dataset, opt, pipe, dataset_name, testing_iterations, saving_iterat
         iter_end.record()
         # logger.info("Training octree_train_start {}".format(octree_train_start.elapsed_time(octree_train_end)))
         # logger.info("Training change_dp_start {}".format(change_dp_start.elapsed_time(change_dp_end)))
-        logger.info("Training prefilter_voxel_start {}".format(prefilter_voxel_start.elapsed_time(prefilter_voxel_end)))
+        # logger.info("Training prefilter_voxel_start {}".format(prefilter_voxel_start.elapsed_time(prefilter_voxel_end)))
         # logger.info("Training iter {}".format(iter_start.elapsed_time(iter_end)))
         
         with torch.no_grad():
@@ -424,7 +777,7 @@ def training(dataset, opt, pipe, dataset_name, testing_iterations, saving_iterat
             if (iteration in checkpoint_iterations):
                 logger.info("\n[ITER {}] Saving Checkpoint".format(iteration))
                 torch.save((gaussians.capture(), iteration), scene.model_path + "/chkpnt" + str(iteration) + ".pth")
-        writer.add_scalar('training loss', loss.item(), iteration)
+        writer.add_scalar('training loss', loss.item(), iteration + offset_iteration)
     writer.close()
     return best_iteration
 
@@ -632,7 +985,8 @@ def render_sets(train_ds : ModelParams, iteration : int, pipeline : PipelinePara
             dataset.ratio, dataset.add_opacity_dist, 
             dataset.add_cov_dist, dataset.add_color_dist, 
             raht=False, n_block=pipeline.n_block, unit_length=dataset.unit_length, 
-            use_pcc=dataset.use_pcc, logger=logger)
+            use_pcc=dataset.use_pcc, logger=logger, enable_octree_training=False, 
+            bit_upper_bound=dataset.bit_upper_bound, bit_lower_bound=dataset.bit_lower_bound)
         scene = Scene(dataset, gaussians, load_iteration=iteration, shuffle=False, load_compressed=load_compressed)
         gaussians.eval()
 
@@ -715,7 +1069,7 @@ def evaluate(model_paths, visible_count=None, wandb=None, tb_writer=None, datase
             wandb.log({"test_PSNR_final":torch.stack(psnrs).mean().item(), })
             wandb.log({"test_LPIPS":torch.stack(lpipss).mean().item(), })
 
-        logger.info(f"model_paths: \033[1;35m{model_paths}\033[0m")
+        logger.info(f"model_paths: \033[1;35m{method_dir}\033[0m")
         logger.info("  SSIM : \033[1;35m{:>12.7f}\033[0m".format(torch.tensor(ssims).mean(), ".5"))
         logger.info("  PSNR : \033[1;35m{:>12.7f}\033[0m".format(torch.tensor(psnrs).mean(), ".5"))
         logger.info("  LPIPS: \033[1;35m{:>12.7f}\033[0m".format(torch.tensor(lpipss).mean(), ".5"))
@@ -840,7 +1194,7 @@ if __name__ == "__main__":
 
     if best_iteration != 0:
         # rendering best
-        logger.info(f'\nStarting Rendering~')
+        logger.info(f'\nStarting Rendering best~')
         visible_count = render_sets(lp.extract(args), best_iteration, pp.extract(args), wandb=wandb, logger=logger, load_compressed=True)
         logger.info("\nRendering complete.")
 

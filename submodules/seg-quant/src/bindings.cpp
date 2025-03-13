@@ -7,4 +7,5 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("quant_forward", &quant_forward, "apply quantization");
     m.def("quant_reverse", &quant_reverse, "apply dequantization");
     m.def("cal_diff", &cal_diff, "calculate difference");
+    m.def("quant_forward_wo_minmax", &quant_forward_wo_minmax, "apply quantization without minmax");
 }

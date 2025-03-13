@@ -40,3 +40,12 @@ void cal_diff(
     torch::Tensor& max_vals,
     torch::Tensor& out_diff
 );
+
+void quant_forward_wo_minmax(
+    const torch::Tensor& features,
+    const torch::Tensor& splits,
+    const torch::Tensor& power_qbits,
+    torch::Tensor& out,
+    torch::Tensor& scales,
+    torch::Tensor& zero_points
+);
