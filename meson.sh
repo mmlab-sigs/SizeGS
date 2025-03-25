@@ -7,10 +7,12 @@ voxel=$4
 log=$5
 block=$6
 size=$7
+prune_per=0.5
 time=$(date "+%Y-%m-%d_%H:%M:%S")
 logdir=sizegs_gpcc
 
-CUDA_VISIBLE_DEVICES=1 python meson.py \
+SECONDS=0
+CUDA_VISIBLE_DEVICES=0 python meson.py \
     --eval -s /mnt/storage/users/szxie_data/nerf_data/${log}/${name} \
     --lod 0 \
     --voxel_size ${voxel} \
@@ -33,5 +35,11 @@ CUDA_VISIBLE_DEVICES=1 python meson.py \
     --mesongs \
     --raht \
     --use_pcc \
+    --percent $prune_per \
+    --bit_upper_bound 16 \
+    --bit_lower_bound 1 \
+    --scene_name $name \
     --load_path outputs/${log}/${name}/baseline/scaffold \
     -m outputs/${log}/${name}/${logdir}/${time}
+duration=$SECONDS
+echo "$((duration / 60)) minutes and $((duration % 60)) seconds elapsed."

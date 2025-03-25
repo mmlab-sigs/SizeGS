@@ -87,6 +87,11 @@ class ModelParams(ParamGroup):
         self.unit_length = 1000
         self.bit_upper_bound = 16
         self.bit_lower_bound = 1
+        self.scene_name = ''
+        self.enable_drop = False
+        self.enable_octree_training = False
+        self.use_coarse_bit_only = False
+        self.use_entropy = False
         super().__init__(parser, "Loading Parameters", sentinel)
 
     def extract(self, args):
@@ -100,7 +105,6 @@ class PipelineParams(ParamGroup):
         self.compute_cov3D_python = False
         self.debug = False
         self.n_block = 20
-        self.enable_octree_training = False
         self.test_zero = True
         super().__init__(parser, "Pipeline Parameters")
 

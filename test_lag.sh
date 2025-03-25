@@ -1,12 +1,15 @@
 #!/bin/bash
 
 name=bicycle
-iter=2000
+iter=1000
+prune_iter=1000
+octree_iter=1000
 length=1000
 voxel=0.0001
 log=360_v2
-block=80
-size=30
+block=60
+size=20
+prune_per=0.5
 time=$(date "+%Y-%m-%d_%H:%M:%S")
 logdir=sizegs_gpcc
 
@@ -35,9 +38,16 @@ CUDA_VISIBLE_DEVICES=1 python meson.py \
     --raht \
     --debug \
     --use_pcc \
+    --percent $prune_per \
     --bit_upper_bound 16 \
     --bit_lower_bound 1 \
+    --scene_name $name \
+    --enable_drop \
+    --prune_iterations $prune_iter \
+    --octree_iterations $octree_iter \
     --load_path outputs/${log}/${name}/baseline/scaffold \
     -m outputs/${log}/${name}/${logdir}/${time}
 duration=$SECONDS
 echo "$((duration / 60)) minutes and $((duration % 60)) seconds elapsed."
+
+    # --enable_drop \

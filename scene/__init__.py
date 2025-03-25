@@ -28,9 +28,9 @@ class Scene:
         """b
         :param path: Path to colmap scene main folder.
         """
-        print('-'* 10 + 'debug' + '-'*10)
-        print('load_compressed: ', load_compressed)
-        print('args.mesongs: ', args.mesongs)
+        # print('-'* 10 + 'debug' + '-'*10)
+        # print('load_compressed: ', load_compressed)
+        # print('args.mesongs: ', args.mesongs)
         
         self.model_path = args.model_path
         
@@ -121,11 +121,21 @@ class Scene:
         self.gaussians.save_ply(os.path.join(point_cloud_path, "point_cloud.ply"))
         self.gaussians.save_mlp_checkpoints(point_cloud_path)
     
-    def save_compressed(self, iteration):
+    def save_compressed(self, iteration, return_remain=False):
         os.makedirs(os.path.join(self.model_path, "zip"), exist_ok=True)
         save_dir = os.path.join(self.model_path, "zip/iteration_{}".format(iteration))
-        save_size = self.gaussians.save_compressed(save_dir, n_iter=iteration)
-        return save_size
+        if return_remain:
+            save_size, remain_bytes = self.gaussians.save_compressed(save_dir, n_iter=iteration, return_remain=return_remain)
+            return save_size, remain_bytes 
+        else:
+            save_size = self.gaussians.save_compressed(save_dir, n_iter=iteration, return_remain=return_remain)
+            return save_size 
+
+    def save_oct_compressed(self, iteration):
+        os.makedirs(os.path.join(self.model_path, "zip"), exist_ok=True)
+        save_dir = os.path.join(self.model_path, "zip/iteration_{}".format(iteration))
+        oct_bytes = self.gaussians.save_oct_compressed(save_dir)
+        return oct_bytes
 
     def getTrainCameras(self, scale=1.0):
         return self.train_cameras[scale]

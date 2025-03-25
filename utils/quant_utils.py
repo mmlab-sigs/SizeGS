@@ -587,7 +587,7 @@ class BatchQuant(nn.Module):
         self.register_buffer('qbits', qbits)
         self.register_buffer('cum_splits', cum_splits)
 
-    def refresh(self, qbits: list = None, splits: torch.Tensor = None):
+    def refresh(self, qbits: torch.Tensor = None, splits: torch.Tensor = None):
         self.min_vals = torch.zeros([self.channel_num, self.block_num]).requires_grad_(False)
         self.max_vals = torch.zeros([self.channel_num, self.block_num]).requires_grad_(False)
         if qbits is not None:
