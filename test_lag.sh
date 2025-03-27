@@ -8,8 +8,8 @@ length=1000
 voxel=0.0001
 log=360_v2
 block=60
-size=20
-prune_per=0.5
+size=24
+prune_per=0.6
 time=$(date "+%Y-%m-%d_%H:%M:%S")
 logdir=sizegs_gpcc
 
@@ -36,6 +36,7 @@ CUDA_VISIBLE_DEVICES=1 python meson.py \
     --n_block $block \
     --mesongs \
     --raht \
+    --save_raht \
     --debug \
     --use_pcc \
     --percent $prune_per \

@@ -5,6 +5,7 @@ import time
 from typing import Union
 from plyfile import PlyData
 import os
+from tempfile import TemporaryDirectory
 
 class UniqueWithGrad(torch.autograd.Function):
     @staticmethod
@@ -332,6 +333,34 @@ def read_ply_geo_bin(ply_path: str) -> np.ndarray:
     ply_data = PlyData.read(ply_path).elements[0]
     means = np.stack([ply_data.data[name] for name in ['x', 'y', 'z']], axis=1)  # shape (N, 3)
     return means
+
+def compress_gpcc(x: torch.Tensor, gpcc_codec_path: str='~/mpeg-pcc-tmc13/build/tmc3/tmc3') -> bytes:
+    """
+    Compress geometry point cloud by GPCC codec.
+    """
+    assert len(x.shape) == 2 and x.shape[1] == 3, f'Input data must be a 3D point cloud, but got {x.shape}.'
+
+    with TemporaryDirectory() as temp_dir:
+        ply_path = os.path.join(temp_dir, 'point_cloud.ply')
+        bin_path = os.path.join(temp_dir, 'point_cloud.bin')
+        write_ply_geo_ascii(x.cpu().numpy(), ply_path=ply_path)
+        gpcc_encode(encoder_path=gpcc_codec_path, ply_path=ply_path, bin_path=bin_path)
+        with open(bin_path, 'rb') as f:
+            strings = f.read()
+    return strings
+
+def decompress_gpcc(strings: bytes, gpcc_codec_path: str='~/mpeg-pcc-tmc13/build/tmc3/tmc3') -> torch.Tensor:
+    """
+    Decompress geometry point cloud by GPCC codec.
+    """
+    with TemporaryDirectory() as temp_dir:
+        ply_path = os.path.join(temp_dir, 'point_cloud.ply')
+        bin_path = os.path.join(temp_dir, 'point_cloud.bin')
+        with open(bin_path, 'wb') as f:
+            f.write(strings)
+        gpcc_decode(decoder_path=gpcc_codec_path, bin_path=bin_path, recon_path=ply_path)
+        x = read_ply_geo_bin(ply_path=ply_path)
+    return torch.tensor(x, dtype=torch.float32)
 
 # def sorted_orig_voxels(voxelized_means, other_params=None):
 #     # means = means.detach().cpu().numpy().astype(np.float32)

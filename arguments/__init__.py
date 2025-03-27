@@ -92,6 +92,7 @@ class ModelParams(ParamGroup):
         self.enable_octree_training = False
         self.use_coarse_bit_only = False
         self.use_entropy = False
+        self.save_raht = False
         super().__init__(parser, "Loading Parameters", sentinel)
 
     def extract(self, args):

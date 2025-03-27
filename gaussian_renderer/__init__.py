@@ -481,8 +481,7 @@ def ft_render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tenso
     Background tensor (bg_color) must be on GPU!
     """
     is_training = True
-    
-    
+        
     if pc.raht:
         xyz, drf = pc.apply_raht_quant(training=True)
     else:
@@ -496,7 +495,6 @@ def ft_render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tenso
         visible_mask, 
         is_training=is_training)
 
-    
     # Create zero tensor. We will use it to make pytorch return gradients of the 2D (screen-space) means
     screenspace_points = torch.zeros_like(xyz, dtype=xyz.dtype, requires_grad=True, device="cuda") + 0
     if retain_grad:

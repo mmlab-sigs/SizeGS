@@ -199,7 +199,7 @@ def per_channel_qbit_upper(cha_qbits, qbit_size_limit):
         per_channel_uppers.append(bi * elem)
     return per_channel_uppers
 
-def qbit_channel_size_estimator(qbits, rf, n_point, n_bit, low_bit, n_channel, n_block, splits: torch.Tensor, use_entropy):
+def qbit_channel_size_estimator(qbits, rf, n_rf, n_bit, low_bit, n_channel, n_block, splits: torch.Tensor, use_entropy):
     if use_entropy:
         input_qbits = []
         for i in range(n_channel):
@@ -220,7 +220,7 @@ def qbit_channel_size_estimator(qbits, rf, n_point, n_bit, low_bit, n_channel, n
         for i in range(n_channel):
             for j in range(n_bit):
                 qbsum += qbits[i*n_bit + j] * (j + low_bit)
-        qbsum = qbsum * (n_point - 1)
+        qbsum = qbsum * n_rf
     
     return qbsum # bit
 
@@ -235,14 +235,14 @@ def qbit_block_size_esimator(qbits, n_bit, low_bit, n_block, splits, use_entropy
                 qbsz += si * qbits[i*n_bit + j] * (j + low_bit)
     return qbsz # bit
 
-def final_qbit_coarse_size_estimator(qbits, n_point, n_channel, enable_drop: bool):
+def final_qbit_coarse_size_estimator(qbits, n_rf, n_channel, enable_drop: bool):
     if enable_drop:
         n_c = n_channel - 3
     else:
         n_c = n_channel
     qbsz = 0
     for i in range(n_c):
-        qbsz += qbits[i] * (n_point - 1)
+        qbsz += qbits[i] * n_rf
     return qbsz
 
 def final_qbit_size_estimator(qbits, splits, n_channel, n_block, enable_drop: bool):
@@ -422,7 +422,7 @@ def solve_coarse_01_ilp_problem(L, n_bit, low_bit, n_channel, n_point, qbit_size
     return qbits
 
 def solve_coarse_ilp_pulp(
-    L, rf, n_bit, low_bit, n_channel, n_block, n_point, 
+    L, rf, n_bit, low_bit, n_channel, n_block, n_rf, 
     qbit_size_limit, splits, enable_drop=False, use_entropy=False, 
     time_limit = 50, warmup=False, vals=None):
     
@@ -435,7 +435,7 @@ def solve_coarse_ilp_pulp(
         variable[f"x{i}"] = LpVariable(f"x{i}", 0, 1, cat=LpInteger)
     prob = LpProblem("Model_Size", LpMinimize)
 
-    prob += qbit_channel_size_estimator([variable[f"x{i}"] for i in range(num_variable)], rf, n_point, n_bit, low_bit, n_channel, n_block, splits, use_entropy) <= qbit_size_limit
+    prob += qbit_channel_size_estimator([variable[f"x{i}"] for i in range(num_variable)], rf, n_rf, n_bit, low_bit, n_channel, n_block, splits, use_entropy) <= qbit_size_limit
 
     for le in range(0, n_channel):
         ri = le * n_bit + n_bit
@@ -577,7 +577,8 @@ def training(dataset: ModelParams, opt, pipe, dataset_name, testing_iterations, 
         dataset.add_cov_dist, dataset.add_color_dist, 
         dataset.raht, pipe.n_block, dataset.unit_length, 
         dataset.use_pcc, logger, dataset.enable_octree_training,
-        dataset.enable_drop, dataset.bit_upper_bound, dataset.bit_lower_bound)
+        dataset.enable_drop, dataset.bit_upper_bound, dataset.bit_lower_bound,
+        dataset.save_raht)
     
     scene = Scene(dataset, gaussians, load_iteration=load_iteration, shuffle=False)
     all_anchor_size = int(gaussians._anchor.shape[0])
@@ -598,7 +599,6 @@ def training(dataset: ModelParams, opt, pipe, dataset_name, testing_iterations, 
         remain_imp = imp[torch.logical_not(pmask)]
         gaussians.prune_anchor_no_grad(pmask)
     logger.info('cal imp: {}'.format(time.time() - bg))
-    
     
     # start after-pruning warm up
     gaussians.training_setup(opt)
@@ -691,8 +691,11 @@ def training(dataset: ModelParams, opt, pipe, dataset_name, testing_iterations, 
     offset_iteration += opt.prune_iterations
     
     # disable anchor update 
-    if not dataset.enable_octree_training:
+    if ((not dataset.enable_octree_training) and dataset.raht):
+        logger.info("use octree")
         gaussians.octree_offline(remain_imp.clone(), dataset.oct_merge)
+    else:
+        logger.info("use quantized xyz")
 
     # start after-octree warm up
     gaussians.training_setup(opt)
@@ -716,15 +719,24 @@ def training(dataset: ModelParams, opt, pipe, dataset_name, testing_iterations, 
         viewpoint_cam = viewpoint_stack.pop(randint(0, len(viewpoint_stack)-1))
         
         voxel_visible_mask = prefilter_voxel(viewpoint_cam, gaussians, pipe, background, training=True)
-                
-        render_pkg = render(
-            viewpoint_cam,
-            gaussians,
-            pipe,
-            background,
-            visible_mask=voxel_visible_mask, 
-            retain_grad=False
-        )
+        if ((not dataset.enable_octree_training) and dataset.raht):
+            render_pkg = render(
+                viewpoint_cam,
+                gaussians,
+                pipe,
+                background,
+                visible_mask=voxel_visible_mask, 
+                retain_grad=False
+            )
+        else:
+            render_pkg = ft_render(
+                viewpoint_cam,
+                gaussians,
+                pipe,
+                background,
+                visible_mask=voxel_visible_mask, 
+                retain_grad=False
+            )
         image, scaling = render_pkg["render"], render_pkg["scaling"]
         gt_image = viewpoint_cam.original_image.cuda()
         Ll1 = l1_loss(image, gt_image)
@@ -758,8 +770,12 @@ def training(dataset: ModelParams, opt, pipe, dataset_name, testing_iterations, 
     
     offset_iteration += opt.octree_iterations
     
-    oct_byte = scene.save_oct_compressed(0)
-    oct_bits = oct_byte * 8
+    # disable xyz update
+    gaussians.disable_anchor_update()
+    logger.info("after octree init disable anchor update")
+
+    # oct_byte = scene.save_oct_compressed(0)
+    # oct_bits = oct_byte * 8
 
     A, B, rf = gaussians.get_fine_grained_ddrf()
     
@@ -770,14 +786,13 @@ def training(dataset: ModelParams, opt, pipe, dataset_name, testing_iterations, 
     else:
         n_c = gaussians.n_channel
         gaussians.init_bqa(qbits=torch.ones([n_c, gaussians.n_block])*8)
-    save_size, remain_bytes = scene.save_compressed(0, return_remain=True)
-    save_bits, remain_bits = save_size * 8, remain_bytes * 8
-    est_qbit_sz = 8 * (gaussians.n_point - 1) * n_c
-    delta_bits = save_bits - est_qbit_sz - remain_bits
+    save_size, other_bytes = scene.save_compressed(0, return_remain=True)
+    save_bits, other_bits = save_size * 8, other_bytes * 8
+    est_qbit_sz = 8 * gaussians.n_rf * n_c
+    delta_bits = save_bits - est_qbit_sz - other_bits
     
     model_size_limit = dataset.target_size*1024*1024*8
     logger.info("model size limit: {} bits, {} MB".format(model_size_limit, model_size_limit/1024/1024/8))
-    num_variable = gaussians.n_channel * gaussians.n_block * gaussians.n_bit
     
     td = True
     if td:
@@ -787,15 +802,15 @@ def training(dataset: ModelParams, opt, pipe, dataset_name, testing_iterations, 
         # print(len(B))
         # assert len(A) == num_variable, "Length of L does not match number of variables."
         
-        other_size = cal_other_size(
-            gaussians.n_channel, 
-            gaussians.n_block, 
-            model_size_limit,
-            oct_bits=oct_bits,
-            enable_drop=dataset.enable_drop,
-            logger=logger)
+        # other_size = cal_other_size(
+        #     gaussians.n_channel, 
+        #     gaussians.n_block, 
+        #     model_size_limit,
+        #     oct_bits=oct_bits,
+        #     enable_drop=dataset.enable_drop,
+        #     logger=logger)
         # logger.info('delta_bits {}, qbit_size_limit {}'.format(delta_bits, qbit_size_limit))
-        qbit_size_limit = model_size_limit - other_size - delta_bits
+        qbit_size_limit = model_size_limit - other_bits - delta_bits
 
         warmup = False
         last_vals = None
@@ -807,7 +822,7 @@ def training(dataset: ModelParams, opt, pipe, dataset_name, testing_iterations, 
                 low_bit = gaussians.bit_lower_bound,
                 n_channel = gaussians.n_channel,
                 n_block = gaussians.n_block,
-                n_point = gaussians.n_point,
+                n_rf = gaussians.n_rf,
                 qbit_size_limit = qbit_size_limit,
                 splits=gaussians.dp_split,
                 enable_drop = dataset.enable_drop,
@@ -819,9 +834,9 @@ def training(dataset: ModelParams, opt, pipe, dataset_name, testing_iterations, 
             warmup=True
             gaussians.bqa.refresh(qbits=torch.tensor(cha_qbits, device="cuda").reshape(-1, 1).repeat(1, gaussians.n_block))
             actual_size = scene.save_compressed(0) * 8 # bits
-            estimate_size = other_size + final_qbit_coarse_size_estimator(cha_qbits, gaussians.n_point, gaussians.n_channel, dataset.enable_drop)
+            estimate_size = other_bits + final_qbit_coarse_size_estimator(cha_qbits, gaussians.n_rf, gaussians.n_channel, dataset.enable_drop)
             delta_size = actual_size - estimate_size
-            qbit_size_limit = model_size_limit - delta_size - other_size
+            qbit_size_limit = model_size_limit - delta_size - other_bits
             logger.info(f"{i} actual size: {actual_size / 8 / 1024/1024}")
             logger.info(f"{i} estimate_size: {estimate_size / 8 / 1024/1024}")
             logger.info(f"{i} delta_size: {delta_size / 8 / 1024/1024}")
@@ -899,9 +914,9 @@ def training(dataset: ModelParams, opt, pipe, dataset_name, testing_iterations, 
                 warmup=True
                 gaussians.bqa.refresh(qbits=final_qbits)
                 actual_size = scene.save_compressed(0) * 8 # bits
-                estimate_size = other_size + final_qbit_size_estimator(final_qbits.detach().cpu().numpy(), gaussians.dp_split.detach().cpu().numpy(), gaussians.n_channel, gaussians.n_block, dataset.enable_drop)
+                estimate_size = other_bits + final_qbit_size_estimator(final_qbits.detach().cpu().numpy(), gaussians.dp_split.detach().cpu().numpy(), gaussians.n_channel, gaussians.n_block, dataset.enable_drop)
                 delta_size = actual_size - estimate_size
-                qbit_size_limit = model_size_limit - delta_size - other_size
+                qbit_size_limit = model_size_limit - delta_size - other_bits
                 
                 logger.info(f"{j} actual size: {actual_size / 8 / 1024/1024}")
                 logger.info(f"{j} estimate_size: {estimate_size / 8 / 1024/1024}")
@@ -1286,7 +1301,7 @@ def render_sets(train_ds : ModelParams, iteration : int, pipeline : PipelinePara
             dataset.add_cov_dist, dataset.add_color_dist, 
             raht=False, n_block=pipeline.n_block, unit_length=dataset.unit_length, 
             use_pcc=dataset.use_pcc, logger=logger, enable_octree_training=False, enable_drop=dataset.enable_drop,
-            bit_upper_bound=dataset.bit_upper_bound, bit_lower_bound=dataset.bit_lower_bound)
+            bit_upper_bound=dataset.bit_upper_bound, bit_lower_bound=dataset.bit_lower_bound, save_raht=dataset.save_raht)
         scene = Scene(dataset, gaussians, load_iteration=iteration, shuffle=False, load_compressed=load_compressed)
         gaussians.eval()
 

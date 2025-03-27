@@ -1,36 +1,19 @@
 import torch 
 import torch.nn as nn
+from utils.quant_utils import cal_diff_wrapper 
+import numpy as np
+npc = torch.tensor(np.load('exp_data/npc.npy'), device="cuda")
+splits = torch.tensor(np.load('exp_data/splits.npy'), device="cuda")
+n_channel = 73
+n_block = 60
+out = cal_diff_wrapper(
+    channel_num = n_channel,
+    block_num = n_block,
+    inputs = npc,
+    splits = splits,
+    qbits = torch.ones([n_channel, n_block], device="cuda")*1,
+)
 
+torch.cuda.synchronize()
 
-class LearnableScaledRoundSTE(torch.autograd.Function):
-    @staticmethod
-    def forward(ctx, x, scale):
-        ctx.save_for_backward(x, scale)
-        scaled_x = x * scale
-        return torch.round(scaled_x) / scale
-    
-    @staticmethod
-    def backward(ctx, grad_output):
-        x, scale = ctx.saved_tensors
-        # 计算对x和scale的梯度
-        grad_x = grad_output.clone() * scale
-        grad_scale = (grad_output.clone() * x).sum()  # 根据需求调整梯度计算
-        return grad_x, grad_scale
-
-# 包装为可学习模块
-class LearnableQuantizer(nn.Module):
-    def __init__(self, init_scale=2**12):
-        super().__init__()
-        self.scale = nn.Parameter(torch.tensor(init_scale))
-    
-    def forward(self, x):
-        return LearnableScaledRoundSTE.apply(x, self.scale)
-
-
-class RAHT(nn.Module):
-    def __init__(self):
-        super().__init__()
-
-    def forward(self, voxel_xyz, features):
-        
-        pass
+print(out)

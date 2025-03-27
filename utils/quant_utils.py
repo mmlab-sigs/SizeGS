@@ -4,6 +4,7 @@ import time
 import torch
 import quant_cuda
 import torch.nn as nn
+import numpy as np
 from torch.autograd import Function
 from torch.cuda.amp import custom_bwd, custom_fwd 
 import segquant
@@ -614,7 +615,7 @@ def cal_diff_wrapper(
     splits: torch.Tensor, 
     qbits: torch.Tensor
 ):
-    inputs = inputs.transpose(0, 1).contiguous() 
+    inputs = inputs.transpose(0, 1).float().contiguous() 
     cum_splits = torch.cumsum(splits, dim=1).int().contiguous() # [C, B]
     min_vals = torch.zeros([channel_num, block_num]).contiguous().cuda()
     max_vals = torch.zeros([channel_num, block_num]).contiguous().cuda()
@@ -631,8 +632,40 @@ def cal_diff_wrapper(
     torch.cuda.synchronize()
     return outputs
 
+# by HAC: https://github.com/YihangChen-ee/HAC/tree/main
+anchor_round_digits = 16
+Q_anchor = 1/(2 ** anchor_round_digits - 1)
+class Quantize_anchor(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, anchors, min_v, max_v):
+        # if anchor_round_digits == 32:
+            # return anchors
+        # min_v = torch.min(anchors).detach()
+        # max_v = torch.max(anchors).detach()
+        # scales = 2 ** anchor_round_digits - 1
+        interval = ((max_v - min_v) * Q_anchor + 1e-6)  # avoid 0, if max_v == min_v
+        # quantized_v = (anchors - min_v) // interval
+        quantized_v = torch.div(anchors - min_v, interval, rounding_mode='floor')
+        quantized_v = torch.clamp(quantized_v, 0, 2 ** anchor_round_digits - 1)
+        anchors_q = quantized_v * interval + min_v
+        return anchors_q, quantized_v
+    @staticmethod
+    def backward(ctx, grad_output, tmp):  # tmp is for quantized_v:)
+        return grad_output, None, None
+
+def calculate_morton_order(x: torch.Tensor) -> torch.Tensor:
+    """
+    Calculate Morton order of the input points.
+    """
+    assert len(x.shape) == 2 and x.shape[1] == 3, f'Input data must be a 3D point cloud, but got {x.shape}.'
+    device = x.device
+    x = x - torch.min(x, dim=0, keepdim=True)[0]
+    x = x.cpu().numpy().astype(np.int64)
+    indices_sorted = np.argsort(x @ np.power(x.max() + 1, np.arange(x.shape[1])), axis=0)
+    indices_sorted = torch.tensor(indices_sorted, dtype=torch.long, device=device)
+    return indices_sorted
+
 if __name__ == '__main__':
-    import numpy as np
     x = np.load('/home/szxie/SizeGS/exp_data/C.npy')
     x = torch.tensor(x[1:, :]).cuda()
     splits = np.load('/home/szxie/SizeGS/exp_data/dp_split.npy')
