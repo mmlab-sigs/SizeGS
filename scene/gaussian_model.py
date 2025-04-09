@@ -27,7 +27,7 @@ import time
 
 
 from utils.compression import create_octree, decode_oct, create_octree_train, d1halfing_fast, sorted_voxels, write_ply_geo_ascii, gpcc_encode, gpcc_decode, read_ply_geo_bin, decode_v, compress_gpcc, decompress_gpcc
-from utils.quant_utils import VanillaQuan, BatchQuant, split_length, dp_split, pure_quant, quant_reverse, cal_diff_wrapper, pure_quant_wo_minmax, Quantize_anchor, calculate_morton_order
+from utils.quant_utils import VanillaQuan, BatchQuant, split_length, dp_split, pure_quant, quant_reverse, cal_diff_wrapper, pure_quant_wo_minmax, Quantize_anchor, calculate_morton_order,  cal_diff_square_wrapper, cal_diff_infinity_wrapper
 from raht_torch import copyAsort, haar3D_param, inv_haar3D_param, itransform_batched_torch, transform_batched_torch
 class GaussianModel:
 
@@ -127,6 +127,7 @@ class GaussianModel:
         self.n_bit = bit_upper_bound - bit_lower_bound + 1
         self.enable_anchor_quant = True
         self.save_raht = save_raht
+        self.training = False
         
         if self.use_feat_bank:
             self.mlp_feature_bank = nn.Sequential(
@@ -137,6 +138,8 @@ class GaussianModel:
             ).cuda()
 
         self.opacity_dist_dim = 1 if self.add_opacity_dist else 0
+        print('self.n_offsets', self.n_offsets)
+        print('feat_dim', feat_dim)
         self.mlp_opacity = nn.Sequential(
             nn.Linear(feat_dim+3+self.opacity_dist_dim, feat_dim),
             nn.ReLU(True),
@@ -146,6 +149,7 @@ class GaussianModel:
 
         self.add_cov_dist = add_cov_dist
         self.cov_dist_dim = 1 if self.add_cov_dist else 0
+        
         self.mlp_cov = nn.Sequential(
             nn.Linear(feat_dim+3+self.cov_dist_dim, feat_dim),
             nn.ReLU(True),
@@ -214,7 +218,7 @@ class GaussianModel:
         self.training_setup(training_args)
         self.denom = denom
         self.optimizer.load_state_dict(opt_dict)
-
+    
     def set_appearance(self, num_cameras):
         if self.appearance_dim > 0:
             self.embedding_appearance = Embedding(num_cameras, self.appearance_dim).cuda()
@@ -296,6 +300,39 @@ class GaussianModel:
         base += 6
         self._rotation = nn.Parameter(rf[:, base:base+4].float().cuda().requires_grad_(True))
         base += 4
+    
+    # def enable_anchor_update(self):
+    #     self._anchor.requires_grad_(True)
+    #     self.enable_anchor_quant = True
+        # with torch.no_grad():
+        #     rf = torch.concat([
+        #         self._anchor_feat.detach(), #32
+        #         self._offset.detach().flatten(-2).contiguous(), # 30
+        #         self._opacity.detach().contiguous(), #1
+        #         self._scaling.detach(), #6
+        #         self._rotation.detach()
+        #     ], -1) 
+        #     # code from HAC-plus: https://github.com/YihangChen-ee/HAC-plus
+        #     anchors = self._anchor.detach()
+        #     _anchor_int = torch.round(anchors / self.voxel_size)
+        #     sorted_indices = calculate_morton_order(_anchor_int)
+        #     anchors = anchors[sorted_indices]
+        #     rf = rf[sorted_indices]
+        
+        # self._anchor = nn.Parameter(
+        #     anchors.float().cuda().requires_grad_(False)
+        # )
+        # base = 0
+        # self._anchor_feat = nn.Parameter(rf[:, base:base + self.feat_dim].float().cuda().contiguous().requires_grad_(True))
+        # base += self.feat_dim
+        # self._offset = nn.Parameter(rf[:, base:base + self.n_offsets*3].reshape([-1, self.n_offsets, 3]).float().cuda().contiguous().requires_grad_(True))
+        # base += self.n_offsets*3
+        # self._opacity = nn.Parameter(rf[:, base:base + 1].float().cuda().requires_grad_(True))
+        # base += 1
+        # self._scaling = nn.Parameter(rf[:, base:base+6].float().cuda().requires_grad_(True))
+        # base += 6
+        # self._rotation = nn.Parameter(rf[:, base:base+4].float().cuda().requires_grad_(True))
+        # base += 4
 
     @property
     def get_anchor_v(self):
@@ -606,7 +643,7 @@ class GaussianModel:
         if n_iter == 0:
             # print(self.dp_split)
             # print(self.bqa.qbits)
-            outputs, scales, zero_points = pure_quant_wo_minmax(
+            outputs, scales, zero_points, max_vals, min_vals = pure_quant_wo_minmax(
                 f,
                 self.dp_split,
                 power_qbits=self.bqa.qbits.to(torch.int32)
@@ -619,18 +656,12 @@ class GaussianModel:
                 min_vals=self.bqa.min_vals.detach(),
                 max_vals=self.bqa.max_vals.detach()
             )
+            max_vals, min_vals = self.bqa.max_vals.detach(), self.bqa.min_vals.detach()
+        # TODO
         # outputs: [C, N]
         trans = torch.concat([scales.reshape(-1), zero_points.reshape(-1)], dim = 0)
-        # assert f.shape[0]==sum(splits[0]), "split length is error"
-        # for i in range(f.shape[-1]):
-        #     qfi, sz = seg_quant_forward(f[:, i], splits[i], self.qas[qa_cnt : qa_cnt + self.n_block])
-        #     qa_cnt += self.n_block
-        #     ret[:, i] = qfi.reshape(-1).cpu()
-        #     trans.extend(sz)
-        # n_values = outputs.shape[0] * outputs.shape[1] # [N, C] # maybe right
-        # print('apply_quant_forward, torch.sum(torch.square(outputs - f))', torch.sum(torch.square(outputs - f)) / n_values)
-        
-        return outputs, trans.cpu().tolist()
+
+        return outputs, trans.cpu().tolist(), max_vals, min_vals 
     
     def apply_quant_reverse(self, n_c: int, f: torch.Tensor, trans_array: list, p: int) -> torch.Tensor:
         n_quant = n_c * self.n_block 
@@ -674,7 +705,9 @@ class GaussianModel:
             oct_byte_size = os.path.getsize(os.path.join(bin_dir, 'oct.npz'))
         return oct_byte_size
     
-    def save_compressed(self, save_dir, n_iter=10000, return_remain=False):
+    def save_compressed(self, save_dir, n_iter=10000, return_path=False, model_path=""):
+        self.logger.info(f"self.save_raht: {self.save_raht}")
+        st_time = time.time()
         os.makedirs(save_dir, exist_ok=True)
         bin_dir = os.path.join(save_dir, 'bins')
         os.makedirs(bin_dir, exist_ok=True)
@@ -704,12 +737,12 @@ class GaussianModel:
         # exit(0)
         if self.raht:
             ff = features[0]
-            qf, sz = self.apply_quant_forward(features[1:], n_iter=n_iter)
+            qf, sz, maxvals, minvals = self.apply_quant_forward(features[1:], n_iter=n_iter)
         else:
-            qf, sz = self.apply_quant_forward(features, n_iter=n_iter)
-        # print('qf[0][:10]', qf[0][:10], torch.sum(qf))
-        # np.save('exp_data/qf.npy', qf.cpu().numpy())
-        # print(torch.sum(qf))
+            qf, sz, maxvals, minvals = self.apply_quant_forward(features, n_iter=n_iter)
+
+        np.save(f'{model_path}/ingredients/maxvals.npy', maxvals.cpu().numpy())
+        np.save(f'{model_path}/ingredients/minvals.npy', minvals.cpu().numpy())
         
         trans.extend(sz)
         cum_split = torch.cumsum(self.dp_split[0].reshape(-1), dim=0).int()
@@ -789,7 +822,7 @@ class GaussianModel:
                 i_8=qf_8, 
                 i_16=qf_16, 
                 t=trans, 
-                h=self.channel_check.cpu().numpy())#这里需要改一下
+                h=self.channel_check.cpu().numpy() if isinstance(self.channel_check, torch.Tensor) else self.channel_check)#这里需要改一下
         else:
             np.savez_compressed(os.path.join(bin_dir, 'oct'), points=self.oct)
             np.savez_compressed(
@@ -808,25 +841,28 @@ class GaussianModel:
         os.system(f'zip -j {bin_zip_path} {bin_dir}/*')
         zip_file_size = os.path.getsize(bin_zip_path)
         
-        print('final sum:', zip_file_size , 'B')
-        print('final sum:', zip_file_size / 1024, 'KB')
-        print('final sum:', zip_file_size / 1024 / 1024, 'MB')
-        if return_remain:
-            trans_size = (n_c * self.n_block * 2 * 32 + 2 * 32) / 8 # scale and zero points, n_block, depth
-            channel_check = n_c * self.n_block * 8 / 8  # maybe 1 bit for True/False
-            if self.raht:
-                oct_param = 6 * 32 / 8 # min max in x, y, z 
-                dc_size = n_c * 32 / 8 # DC coefficient
-            else:
-                oct_param = 0
-                dc_size = 0
-            # oct_size = n_point * 64 # octree size 
-            mlp_size = int(50 * 1024 * 0.75) # MLPs
-            remain_bytes = mlp_size + trans_size + channel_check + oct_param + dc_size + oct_bytes
-            return zip_file_size, remain_bytes
+        # print('final sum:', zip_file_size , 'B')
+        # print('final sum:', zip_file_size / 1024, 'KB')
+        # print('final sum:', zip_file_size / 1024 / 1024, 'MB')
+        self.logger.info("saving time: {}".format(time.time() - st_time))
+        if return_path:
+            return zip_file_size, bin_zip_path
         else:
             return zip_file_size
     
+    # if return_remain:
+    #         trans_size = (n_c * self.n_block * 2 * 32 + 2 * 32) / 8 # scale and zero points, n_block, depth
+    #         channel_check = n_c * self.n_block * 8 / 8  # maybe 1 bit for True/False
+    #         if self.save_raht:
+    #             oct_param = 6 * 32 / 8 # min max in x, y, z 
+    #             dc_size = n_c * 32 / 8 # DC coefficient
+    #         else:
+    #             oct_param = 0
+    #             dc_size = 0
+    #         # oct_size = n_point * 64 # octree size 
+    #         mlp_size = int(50 * 1024 * 0.75) # MLPs
+    #         remain_bytes = mlp_size + trans_size + channel_check + oct_param + dc_size + oct_bytes
+    #         return zip_file_size, remain_bytes
     
     def load_compressed(self, save_path):
         # self.use_pcc = use_pcc
@@ -848,25 +884,22 @@ class GaussianModel:
         if os.path.exists(tmp_dir):
             shutil.rmtree(tmp_dir)
         os.makedirs(tmp_dir)
-                
+        # self.logger.info(f"load self.save_raht: {self.save_raht}")
+        
         if self.use_pcc and self.save_raht:
             attris = np.load(os.path.join(bin_dir, 'fe.npz'))
             trans = attris['t']
             self.channel_check = attris['h']
-            
             self.depth = int(trans[0])
             self.n_block = int(trans[1])
-            
             ply_path = os.path.join(tmp_dir, 'voxelized_means.ply')
             means_bin_path = os.path.join(bin_dir, 'compressed.bin')
             gpcc_decode(bin_path=means_bin_path, recon_path=ply_path)
             voxelized_means = read_ply_geo_bin(ply_path=ply_path).astype(np.float32)
-            # voxelized_means = sorted_voxels(voxelized_means)  # decoded voqxelized means are unsorted, thus need sorting
             oct_param = attris['o']
             ff = torch.tensor(attris['f'], dtype=torch.float32).cuda()
             dxyz, V = decode_v(oct_param, voxelized_means, self.depth)
             # decode features
-            
         elif self.use_pcc:
             attris = np.load(os.path.join(bin_dir, 'fe.npz'))
             trans = attris['t']
@@ -995,6 +1028,27 @@ class GaussianModel:
         torch.cuda.empty_cache()
         self.logger.info('load time {}'.format(time.time()-t))
     
+    def refresh_attributes(self, xyz, rf):
+        self._anchor = nn.Parameter(xyz.cuda().requires_grad_(True))
+        base = 0
+        self._anchor_feat = nn.Parameter(rf[:, base:base + self.feat_dim].cuda().contiguous().requires_grad_(True))
+        base += self.feat_dim #47
+        self._offset = nn.Parameter(rf[:, base:base + self.n_offsets*3].reshape([-1, self.n_offsets, 3]).cuda().contiguous().requires_grad_(True))
+        base += self.n_offsets*3  #62
+        self._opacity = nn.Parameter(rf[:, base:base+1].cuda().requires_grad_(True))
+        base += 1 #63
+        self._scaling = nn.Parameter(rf[:, base:base+6].cuda().requires_grad_(True))
+        base += 6 #69
+        self._rotation = nn.Parameter(rf[:, base:base+4].cuda().requires_grad_(True))
+        base += 4 #73
+        self.logger.info('refresh_attributes feature size {}'.format(rf.shape))
+        self.n_channel = base
+        self.n_point = xyz.shape[0]
+        if self.raht:
+            self.n_rf = self.n_point - 1
+        else:
+            self.n_rf = self.n_point 
+    
     def save_old_compressed(self, save_dir):
         os.makedirs(save_dir, exist_ok=True)
         bin_dir = os.path.join(save_dir, 'bins')
@@ -1072,62 +1126,20 @@ class GaussianModel:
         channel_check = qbits <= 8
         self.channel_check = channel_check
         self.logger.info('channel_check sum: {}, groups: {}'.format(torch.sum(channel_check), self.n_channel * self.n_block))
-        
-        # high_bit_channels = []
-        # low_bit_channels = []
-        # for i in range(self.n_channel):
-        #     qbit = qbits[i]
-        #     if qbit > 8:
-        #         high_bit_channels.append(i)
-        #     else:
-        #         low_bit_channels.append(i)
-        # self.high_bit_channels = high_bit_channels
-        # self.low_bit_channels = low_bit_channels
-        
-        # if dp == False:
-        #     if self.raht:
-        #         split = split_length(self.n_point - 1, self.n_block)
-        #     else:
-        #         split = split_length(self.n_point, self.n_block)
-        #     splits = [split] * self.n_channel
-        # else:
-        #     rf = torch.concat([
-        #         self._anchor_feat_v.detach(), 
-        #         self._offset_v.detach().flatten(-2).contiguous(), 
-        #         self._opacity_v.detach().contiguous(), 
-        #         self._scaling_v.detach(), 
-        #         self._rotation_v.detach()], -1)
-
-        #     C = rf[self.reorder]
-        #     iW1 = self.res['iW1']
-        #     iW2 = self.res['iW2']
-        #     iLeft_idx = self.res['iLeft_idx']
-        #     iRight_idx = self.res['iRight_idx']
-            
-        #     for d in range(self.depth * 3):
-        #         w1 = iW1[d]
-        #         w2 = iW2[d]
-        #         left_idx = iLeft_idx[d]
-        #         right_idx = iRight_idx[d]
-        #         C[left_idx], C[right_idx] = transform_batched_torch(w1, 
-        #                                             w2, 
-        #                                             C[left_idx], 
-        #                                             C[right_idx])
-
-        #     split_0 = dp_split(C[1:, :32], self.qas[:32*self.n_block], self.n_block, C.shape[0]-1, self.unit_length)
-        #     # split_1 = dp_split(C[1:, 32:], self.qas[32*self.n_block:], self.n_block, C.shape[0]-1)
-        #     # print("Finished_2")
-        #     # split = [split_0] * 32 + [split_1] * 41
-        #     splits = [split_0] * self.n_channel
-        # self.dp_split = torch.tensor(splits, dtype=int).cuda()
-        # print('split init bqa', torch.sum(self.dp_split[0]))
-        # print('self.n_point', self.n_point)
-        # np.save('exp_data/qbits.npy', np.array(qbits))
-        # np.save('exp_data/dp_split.npy', self.dp_split.cpu().numpy())
     
     def update_bqa(self, qbits = None, splits = None):
         self.bqa.refresh(qbits, splits)
         self.bqa = self.bqa.cuda()
+        channel_check = qbits <= 8
+        self.channel_check = channel_check
+        self.logger.info('channel_check sum: {}, groups: {}'.format(torch.sum(channel_check), self.n_channel * self.n_block))
+    
+    def update_bqa_wo_refresh(self, qbits = None, splits = None):
+        self.bqa.update_qa(qbits, splits)
+        self.bqa = self.bqa.cuda()
+        channel_check = qbits <= 8
+        self.channel_check = channel_check
+        self.logger.info('channel_check sum: {}, groups: {}'.format(torch.sum(channel_check), self.n_channel * self.n_block))
         
     def init_qas(self, n_block, qbits):
         assert self.n_channel != -1
@@ -1778,6 +1790,9 @@ class GaussianModel:
             self.n_rf = self.n_point - 1
         else:
             self.n_rf = self.n_point 
+        
+        # if self.n_channel == -1:
+        #     self.n_channel = 73
     
     def anchor_growing(self, grads, threshold, offset_mask):
         ## 
@@ -2068,24 +2083,7 @@ class GaussianModel:
                                                   w2, 
                                                   C[left_idx], 
                                                   C[right_idx])
-
-
-        # quantC = torch.zeros_like(C)
-        # quantC[0] = C[0]
-        # qa_cnt = 0
-        # lc1 = C.shape[0] - 1
-        # split_ac = self.dp_split
-        # print('lc1', lc1)
-        # print('sum(split_ac[0])', sum(split_ac[0]))
-        # assert lc1==sum(split_ac[0]), "split length is error"
-
         self.n_channel = C.shape[-1]
-
-        # np.save('exp_data/C.npy', C.detach().cpu().numpy())
-        # np.save('exp_data/dp_split.npy', self.dp_split.detach().cpu().numpy())
-        # print('self.dp_split', self.dp_split)
-        # print('self.dp_split', self.dp_split.shape)
-        # print('self.dp_split[i].reshape(1, -1)', self.dp_split[1].reshape(1, -1).shape)
         
         npc = C.detach().cpu().numpy()
         A = torch.zeros(self.n_channel, 16).cuda()
@@ -2119,7 +2117,7 @@ class GaussianModel:
         return A_flat
 
         
-    def get_fine_grained_ddrf(self):
+    def get_fine_grained_ddrf(self, dis_type=1):
 
         C = torch.concat([
             self._anchor_feat.detach(), #32
@@ -2127,8 +2125,6 @@ class GaussianModel:
             self._opacity.detach().contiguous(), #1
             self._scaling.detach(), #6
             self._rotation.detach()], -1) #4
-
-        
 
         if self.raht:
             # t = time.time()
@@ -2165,14 +2161,22 @@ class GaussianModel:
         assert splits.shape[0] == self.n_channel
         print('get_fine_grained_ddrf self.n_channel', self.n_channel)
         # [[int(j)] * self.n_channel]*self.n_block
+        
+        if dis_type == 1:
+            cal_diff_func = cal_diff_wrapper
+        elif dis_type == 2:
+            cal_diff_func = cal_diff_square_wrapper
+        elif dis_type == 3:
+            cal_diff_func = cal_diff_infinity_wrapper
+            
         with torch.no_grad():
             for j in range(self.bit_lower_bound, self.bit_upper_bound + 1):
-                np.save('exp_data/npc.npy', npc.cpu().numpy())
-                np.save('exp_data/splits.npy', splits.cpu().numpy())
-                self.logger.info(f"j {j}")
-                self.logger.info('splits.shape {}, device {}, sum {}'.format(splits.shape, splits.get_device(), torch.sum(splits)))
-                self.logger.info('npc.shape {}, device {}'.format(npc.shape, npc.get_device()))
-                out = cal_diff_wrapper(
+                # np.save('exp_data/npc.npy', npc.cpu().numpy())
+                # np.save('exp_data/splits.npy', splits.cpu().numpy())
+                # self.logger.info(f"j {j}")
+                # self.logger.info('splits.shape {}, device {}, sum {}'.format(splits.shape, splits.get_device(), torch.sum(splits)))
+                # self.logger.info('npc.shape {}, device {}'.format(npc.shape, npc.get_device()))
+                out = cal_diff_func(
                     channel_num = self.n_channel,
                     block_num = self.n_block,
                     inputs = npc,

@@ -370,7 +370,7 @@ def ft_gng(
 ):
     ## view frustum filtering for acceleration    
     if visible_mask is None:
-        visible_mask = torch.ones(pc.get_anchor_v.shape[0], dtype=torch.bool, device = pc.get_anchor_v.device)
+        visible_mask = torch.ones(pc.get_anchor.shape[0], dtype=torch.bool, device = pc.get_anchor.device)
     
     base = 0
     feat = rf[:, base:base+pc.feat_dim][visible_mask]

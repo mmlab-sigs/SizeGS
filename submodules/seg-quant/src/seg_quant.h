@@ -47,5 +47,26 @@ void quant_forward_wo_minmax(
     const torch::Tensor& power_qbits,
     torch::Tensor& out,
     torch::Tensor& scales,
-    torch::Tensor& zero_points
+    torch::Tensor& zero_points,
+    torch::Tensor& max_vals,
+    torch::Tensor& min_vals
+);
+
+
+void cal_diff_infinity(
+    const torch::Tensor& features,
+    const torch::Tensor& cum_splits,
+    const torch::Tensor& power_qbits,
+    torch::Tensor& min_vals,
+    torch::Tensor& max_vals,
+    torch::Tensor& out_diff
+);
+
+void cal_diff_square(
+    const torch::Tensor& features,
+    const torch::Tensor& cum_splits,
+    const torch::Tensor& power_qbits,
+    torch::Tensor& min_vals,
+    torch::Tensor& max_vals,
+    torch::Tensor& out_diff
 );

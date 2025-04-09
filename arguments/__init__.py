@@ -93,6 +93,10 @@ class ModelParams(ParamGroup):
         self.use_coarse_bit_only = False
         self.use_entropy = False
         self.save_raht = False
+        self.test_resize = False 
+        self.newsize=16
+        self.dis_type=3
+        self.csv_path=""
         super().__init__(parser, "Loading Parameters", sentinel)
 
     def extract(self, args):

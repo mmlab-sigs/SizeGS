@@ -11,7 +11,7 @@
 
 import os
 import numpy as np
-
+import csv 
 import subprocess
 from multiprocessing import Pool
 # cmd = 'nvidia-smi -q -d Memory |grep -A4 GPU|grep Used'
@@ -557,8 +557,14 @@ def solve_wrapper(args):
 
 
 def training(dataset: ModelParams, opt, pipe, dataset_name, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from, load_iteration, wandb=None, logger=None, ply_path=None):
+    if not os.path.exists(dataset.csv_path):
+        f = open(dataset.csv_path, 'a+')
+        wtr = csv.writer(f)
+        wtr.writerow(['name', 'iteration', 'percent', 'psnr', 'ssim', 'lpips', 'size'])
+        f.close()
+    
     first_iter = 0
-    tb_writer = prepare_output_and_logger(dataset, opt, pipe)
+    tb_writer = prepare_output_and_logger(dataset)
     bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
     background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
 
@@ -612,7 +618,6 @@ def training(dataset: ModelParams, opt, pipe, dataset_name, testing_iterations, 
     viewpoint_stack = None
     iter_start = torch.cuda.Event(enable_timing = True)
     iter_end = torch.cuda.Event(enable_timing = True)
-    
     
     ema_loss_for_log = 0.0
     first_iter = 0
@@ -674,7 +679,7 @@ def training(dataset: ModelParams, opt, pipe, dataset_name, testing_iterations, 
                 loss, 
                 l1_loss, 
                 iter_start.elapsed_time(iter_end), 
-                [500, 1000], 
+                [500, 1000, 1500, 2000], 
                 scene, 
                 render, 
                 (pipe, background), 
@@ -760,7 +765,7 @@ def training(dataset: ModelParams, opt, pipe, dataset_name, testing_iterations, 
                 progress_bar.close()
 
             # Log and save
-            training_report(tb_writer, dataset_name, iteration, Ll1, loss, l1_loss, iter_start.elapsed_time(iter_end), [500, 1000], scene, render, (pipe, background), wandb, logger)
+            training_report(tb_writer, dataset_name, iteration, Ll1, loss, l1_loss, iter_start.elapsed_time(iter_end), [500, 1000, 1500, 2000], scene, render, (pipe, background), wandb, logger)
                     
             # Optimizer step
             if iteration < opt.octree_iterations:
@@ -773,11 +778,9 @@ def training(dataset: ModelParams, opt, pipe, dataset_name, testing_iterations, 
     # disable xyz update
     gaussians.disable_anchor_update()
     logger.info("after octree init disable anchor update")
-
-    # oct_byte = scene.save_oct_compressed(0)
-    # oct_bits = oct_byte * 8
-
-    A, B, rf = gaussians.get_fine_grained_ddrf()
+    A, B, rf = gaussians.get_fine_grained_ddrf(dis_type=dataset.dis_type)
+    os.makedirs(os.path.join(scene.model_path, "ingredients"), exist_ok=True)
+    np.save(os.path.join(scene.model_path, "ingredients", 'A.npy'), A.cpu().numpy())
     
     '''before search'''
     if dataset.enable_drop:
@@ -786,34 +789,22 @@ def training(dataset: ModelParams, opt, pipe, dataset_name, testing_iterations, 
     else:
         n_c = gaussians.n_channel
         gaussians.init_bqa(qbits=torch.ones([n_c, gaussians.n_block])*8)
-    save_size, other_bytes = scene.save_compressed(0, return_remain=True)
-    save_bits, other_bits = save_size * 8, other_bytes * 8
+    save_size = scene.save_compressed(0)
+    save_bits = save_size * 8
     est_qbit_sz = 8 * gaussians.n_rf * n_c
-    delta_bits = save_bits - est_qbit_sz - other_bits
-    
+    # - est_qbit_sz - other_bits
     model_size_limit = dataset.target_size*1024*1024*8
+    delta_bits = model_size_limit - save_bits 
+    qbit_size_limit = est_qbit_sz + delta_bits
     logger.info("model size limit: {} bits, {} MB".format(model_size_limit, model_size_limit/1024/1024/8))
     
     td = True
     if td:
         br = time.time()
-        
-        # print(A.shape)
-        # print(len(B))
-        # assert len(A) == num_variable, "Length of L does not match number of variables."
-        
-        # other_size = cal_other_size(
-        #     gaussians.n_channel, 
-        #     gaussians.n_block, 
-        #     model_size_limit,
-        #     oct_bits=oct_bits,
-        #     enable_drop=dataset.enable_drop,
-        #     logger=logger)
-        # logger.info('delta_bits {}, qbit_size_limit {}'.format(delta_bits, qbit_size_limit))
-        qbit_size_limit = model_size_limit - other_bits - delta_bits
-
         warmup = False
         last_vals = None
+        actual_sizes =[]
+        qbit_size_limits = []
         for i in range(4):
             cha_qbits, last_vals = solve_coarse_ilp_pulp(
                 B,
@@ -827,20 +818,39 @@ def training(dataset: ModelParams, opt, pipe, dataset_name, testing_iterations, 
                 splits=gaussians.dp_split,
                 enable_drop = dataset.enable_drop,
                 use_entropy = dataset.use_entropy,
-                time_limit=100,
+                time_limit=200,
                 warmup=warmup,
                 vals=last_vals
             )
+            logger.info(f"{i} qbit_size_limit: {qbit_size_limit / 8 } bytes")
             warmup=True
-            gaussians.bqa.refresh(qbits=torch.tensor(cha_qbits, device="cuda").reshape(-1, 1).repeat(1, gaussians.n_block))
+            logger.info(f"cha_qbits: {cha_qbits}")
+            gaussians.update_bqa(qbits=torch.tensor(cha_qbits, device="cuda").reshape(-1, 1).repeat(1, gaussians.n_block))
             actual_size = scene.save_compressed(0) * 8 # bits
-            estimate_size = other_bits + final_qbit_coarse_size_estimator(cha_qbits, gaussians.n_rf, gaussians.n_channel, dataset.enable_drop)
-            delta_size = actual_size - estimate_size
-            qbit_size_limit = model_size_limit - delta_size - other_bits
-            logger.info(f"{i} actual size: {actual_size / 8 / 1024/1024}")
-            logger.info(f"{i} estimate_size: {estimate_size / 8 / 1024/1024}")
-            logger.info(f"{i} delta_size: {delta_size / 8 / 1024/1024}")
-            logger.info(f"{i} qbit_size_limit: {qbit_size_limit / 8 / 1024/1024}")
+            if i > 0:
+                delta_actual_size = actual_size - actual_sizes[-1] + 0.1
+                delta_qbit_limit = qbit_size_limit - qbit_size_limits[-1] + 0.1
+            else:
+                delta_actual_size = 1
+                delta_qbit_limit = 1
+
+            actual_sizes.append(actual_size)
+            qbit_size_limits.append(qbit_size_limit)
+            searched_qbit_size = final_qbit_coarse_size_estimator(cha_qbits, gaussians.n_rf, gaussians.n_channel, dataset.enable_drop)
+            logger.info(f"{i} searched_qbit_size: {searched_qbit_size / 8 } bytes")
+            
+            # delta_size = actual_size - estimate_size  
+            # qbit_size_limit = model_size_limit - delta_size - other_bits
+            delta_qbit = delta_qbit_limit / delta_actual_size * (model_size_limit - actual_size)
+            if delta_qbit > actual_size:
+                delta_qbit = model_size_limit - actual_size
+            qbit_size_limit = qbit_size_limit + delta_qbit
+            logger.info(f"{i} actual size: {actual_size / 8 / 1024/1024} MB {actual_size / 8} B")
+            if abs(actual_size - model_size_limit) / model_size_limit < 0.05:
+                break
+            # logger.info(f"{i} estimate_size: {estimate_size / 8 / 1024/1024}")
+            # logger.info(f"{i} delta_size: {delta_size / 8 / 1024/1024}")
+            # logger.info(f"{i+1} qbit_size_limit: {qbit_size_limit / 8 / 1024/1024}")
             
         if dataset.use_coarse_bit_only:
             logger.info('use coarse')
@@ -857,35 +867,13 @@ def training(dataset: ModelParams, opt, pipe, dataset_name, testing_iterations, 
             last_vals = [iqb_one_hot*gaussians.n_block for iqb_one_hot in cha_qbits_one_hot]
             # logger.info('len(last_vals) {}, len(last_vals[0]) {}'.format(len(last_vals), len(last_vals[0])))
             time_limit = 50
-            
+            actual_sizes =[]
+            qbit_size_limits = []
             for j in range(4):
                 per_channel_size_limit = per_channel_qbit_upper(cha_qbits, qbit_size_limit)
                 if dataset.enable_drop:
                     assert len(per_channel_size_limit) == 70
-                    
-                # args_list = []
-                # for i, pc_szlmit in enumerate(per_channel_size_limit):
-                #     args_list.append(
-                #         (
-                #             A[i].flatten().cpu().tolist(),  # 提前转换为CPU列表
-                #             gaussians.n_bit,
-                #             gaussians.bit_lower_bound,
-                #             gaussians.n_block,
-                #             gaussians.dp_split[i].reshape(-1).cpu().tolist(),
-                #             pc_szlmit,
-                #             dataset.use_entropy, 
-                #             time_limit,
-                #             warmup,
-                #             last_vals[i]
-                #         )
-                #     )
-                #     logger.info("type A[i].flatten().cpu().tolist() {}".format(type(A[i].flatten().cpu().tolist())))
-                #     logger.info("type gaussians.n_bit {}".format(type(gaussians.n_bit)))
-                #     logger.info("type gaussians.dp_split[i].reshape(-1).cpu().tolist() {}".format(type(gaussians.dp_split[i].reshape(-1).cpu().tolist())))
-                #     logger.info("type pc_szlmit {}".format(type(pc_szlmit)))
-                #     logger.info("type time_limit {}".format(type(time_limit)))
-                #     logger.info("type last_vals {} {}".format(i, type(last_vals[i])))
-                
+                        
                 args_list = [
                     (
                         A[i].flatten().cpu().tolist(),  # 提前转换为CPU列表
@@ -910,74 +898,67 @@ def training(dataset: ModelParams, opt, pipe, dataset_name, testing_iterations, 
                 # logger.info("last_vals {}".format(last_vals))       
                 final_qbits = torch.stack(final_qbits)
                 # logger.info("final_qbits {}".format(final_qbits))  
+                logger.info(f"{j} qbit_size_limit: {qbit_size_limit / 8 } bytes")
                 
                 warmup=True
-                gaussians.bqa.refresh(qbits=final_qbits)
+                gaussians.update_bqa(qbits=final_qbits)
                 actual_size = scene.save_compressed(0) * 8 # bits
-                estimate_size = other_bits + final_qbit_size_estimator(final_qbits.detach().cpu().numpy(), gaussians.dp_split.detach().cpu().numpy(), gaussians.n_channel, gaussians.n_block, dataset.enable_drop)
-                delta_size = actual_size - estimate_size
-                qbit_size_limit = model_size_limit - delta_size - other_bits
                 
-                logger.info(f"{j} actual size: {actual_size / 8 / 1024/1024}")
-                logger.info(f"{j} estimate_size: {estimate_size / 8 / 1024/1024}")
-                logger.info(f"{j} delta_size: {delta_size / 8 / 1024/1024}")
-                logger.info(f"{j} qbit_size_limit: {qbit_size_limit / 8 / 1024/1024} MB, {qbit_size_limit} bits")
+                if j > 0:
+                    delta_actual_size = actual_size - actual_sizes[-1] + 0.1
+                    delta_qbit_limit = qbit_size_limit - qbit_size_limits[-1] + 0.1
+                else:
+                    delta_actual_size = 1
+                    delta_qbit_limit = 1
+                    
+                actual_sizes.append(actual_size)
+                qbit_size_limits.append(qbit_size_limit)
+                searched_qbit_size = final_qbit_size_estimator(final_qbits.detach().cpu().numpy(), gaussians.dp_split.detach().cpu().numpy(), gaussians.n_channel, gaussians.n_block, dataset.enable_drop)
+                logger.info(f"{j} searched_qbit_size: {searched_qbit_size / 8 } bytes")
+                delta_qbit = delta_qbit_limit / delta_actual_size * (model_size_limit - actual_size)
+                if delta_qbit > actual_size:
+                    delta_qbit = model_size_limit - actual_size
+                qbit_size_limit = qbit_size_limit + delta_qbit
+                
+                logger.info(f"{j} actual size: {actual_size / 8 / 1024/1024} {actual_size / 8} B")
+                if abs(actual_size - model_size_limit) / model_size_limit < 0.05:
+                    break
+                # logger.info(f"{j} estimate_size: {estimate_size / 8 / 1024/1024}")
+                # logger.info(f"{j} delta_size: {delta_size / 8 / 1024/1024}")
+                # logger.info(f"{j} qbit_size_limit: {qbit_size_limit / 8 / 1024/1024} MB, {qbit_size_limit} bits")
                 
             
         final_qbit_est_size = final_qbit_size_estimator(final_qbits, gaussians.dp_split, gaussians.n_channel, gaussians.n_block, dataset.enable_drop)
         # print('final_qbits.shape', final_qbits.shape)
         logger.info('final_qbit_est_size: {}'.format(final_qbit_est_size))
-        # final_qbits = []
-        # for i, pc_szlmit in enumerate(per_channel_size_limit):
-        #     per_block_qbits = solve_channel_ilp_pulp(
-        #         L=A[i].flatten().cpu().tolist(),
-        #         n_bit=gaussians.n_bit,
-        #         low_bit=gaussians.bit_lower_bound,
-        #         n_block=gaussians.n_block,
-        #         n_point=gaussians.n_point,
-        #         splits=gaussians.dp_split[i].reshape(-1).cpu().tolist(),
-        #         model_size_limit=pc_szlmit
-        #     )
-        #     final_qbits.append(torch.tensor(per_block_qbits, device="cuda", dtype=int))
-        # final_qbits = torch.stack(final_qbits)
-        np.save('exp_data/final_qbits.npy', final_qbits.cpu().numpy())
+        np.save(os.path.join(scene.model_path, "ingredients", 'final_qbits.npy'), final_qbits.cpu().numpy())
         logger.info('searching time: {} mins'.format((time.time() - br) / 60))
     else:
         final_qbits = torch.tensor(np.load('exp_data/final_qbits.npy'), device="cuda", dtype=int)
-    
-    # np.save('exp_data/final_qbits.npy', final_qbits.cpu().numpy())
-    # print(final_qbits)
-    # print('cha_qbits', cha_qbits)
-    # exit(0)
-    # print('cha_qbits', cha_qbits)
-    # print(qbits)
-    # print('qbits.shape', qbits.shape)
-    # final_qbits = cha_qbits
-    
-    #debug
-    # final_qbits = [8]*73
-    # print("final qbits", np.sum(final_qbits)/gaussians.n_channel/gaussians.n_block)
-    # print("final qbits", final_qbits[:10, :10])
 
     gaussians.init_bqa(final_qbits)
     gaussians.training_setup(opt)
     gaussians.train()
 
-    logger.info("\n[ITER 0] Saving Gaussians")
-    with torch.no_grad():
-        scene.save_compressed(0)
+    # logger.info("\n[ITER 0] Saving Gaussians")
+    # with torch.no_grad():
+    #     zip_size, zip_path = scene.save_compressed(0, return_path=True)
+    #     zip_size = zip_size / 1024 / 1024 # to MB
+    #     gaussians.load_compressed(zip_path) # TODO: to test mode
+    #     _, _, pp, ss, ll = render_set(dataset.model_path, "test", 0, scene.getTestCameras(), gaussians, pipe, background, cal_metric=True)
+    #     row = []
+    #     row.append(dataset.scene_name)
+    #     row.append(0)
+    #     row.append(dataset.percent)
+    #     row.extend([pp, ss, ll])
+    #     row.append(zip_size)
+    #     f = open(dataset.csv_path, 'a+')
+    #     wtr = csv.writer(f)
+    #     wtr.writerow(row)
+    #     f.close()
+    #     print("Testset Evaluating {}. PSNR: {}, SSIM: {}, LIPIS: {}".format(0, pp, ss, ll, zip_size))
+    
 
-    # octree_train_start = torch.cuda.Event(enable_timing = True)
-    # octree_train_end = torch.cuda.Event(enable_timing = True)
-    # change_dp_start = torch.cuda.Event(enable_timing = True)
-    # change_dp_end = torch.cuda.Event(enable_timing = True)
-    # prefilter_voxel_start = torch.cuda.Event(enable_timing = True)
-    # prefilter_voxel_end = torch.cuda.Event(enable_timing = True)
-    # loss_best = 0.05
-    # best_iteration = 0
-
-    # writer = SummaryWriter(log_dir='runs/testing')
-    # viewpoint_stack = None
     ema_loss_for_log = 0.0
     first_iter = 0
     progress_bar = tqdm(range(first_iter, opt.iterations), desc="Training progress")
@@ -987,6 +968,11 @@ def training(dataset: ModelParams, opt, pipe, dataset_name, testing_iterations, 
     best_psnr = 0.
     logger.info("start Training")
     
+    new_test_iters = np.arange(0, opt.iterations, 200).tolist()
+    testing_iterations.extend(new_test_iters)
+    testing_iterations = np.unique(testing_iterations).tolist()
+    logger.info('testing iterations: {}'.format(testing_iterations))
+    
     bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
     background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
     
@@ -995,23 +981,7 @@ def training(dataset: ModelParams, opt, pipe, dataset_name, testing_iterations, 
         iter_start.record()
         gaussians.optimizer.zero_grad()
         gaussians.update_learning_rate(iteration)
-        
-        # octree_train_start.record()
-        # 
-        # octree_train_end.record()
-        
-        # if iteration == 1:
             
-            # gaussians.init_qas(pipe.n_block, final_qbits)
-            # gaussians.update_bqa(final_qbits)
-            # gaussians.set_dp_split(dp=dp)
-            # print(gaussians.dp_split[0])
-
-        # change_dp_start.record()
-        # gaussians.change_dp_split(dp=dp)
-        # change_dp_end.record()
-        
-        
         # Pick a random Camera
         if not viewpoint_stack:
             viewpoint_stack = scene.getTrainCameras().copy()
@@ -1024,7 +994,8 @@ def training(dataset: ModelParams, opt, pipe, dataset_name, testing_iterations, 
         # prefilter_voxel_start.record()
         voxel_visible_mask = prefilter_voxel(viewpoint_cam, gaussians, pipe, background, training=True)
         # prefilter_voxel_end.record()
-        retain_grad = (iteration < opt.update_until and iteration >= 0)
+        retain_grad = False
+
         # visible_mask = torch.ones(gaussians.get_anchor_v.shape[0], dtype=torch.bool, device = gaussians.get_anchor_v.device)
         
         render_pkg = ft_render(viewpoint_cam, gaussians, pipe, background, visible_mask=voxel_visible_mask, retain_grad=retain_grad)
@@ -1085,7 +1056,7 @@ def training(dataset: ModelParams, opt, pipe, dataset_name, testing_iterations, 
     writer.close()
     return best_iter
 
-def prepare_output_and_logger(args, args_1, args_2):    
+def prepare_output_and_logger(args):    
     if not args.model_path:
         if os.getenv('OAR_JOB_ID'):
             unique_str=os.getenv('OAR_JOB_ID')
@@ -1098,15 +1069,15 @@ def prepare_output_and_logger(args, args_1, args_2):
     os.makedirs(args.model_path, exist_ok = True)
     with open(os.path.join(args.model_path, "cfg_args"), 'w') as cfg_log_f:
         cfg_log_f.write(str(Namespace(**vars(args))))
-        cfg_log_f.write(str(Namespace(**vars(args_1))))
-        cfg_log_f.write(str(Namespace(**vars(args_2))))
+        # cfg_log_f.write(str(Namespace(**vars(args_1))))
+        # cfg_log_f.write(str(Namespace(**vars(args_2))))
 
     # Create Tensorboard writer
-    tb_writer = None
-    if TENSORBOARD_FOUND:
-        tb_writer = SummaryWriter(args.model_path)
-    else:
-        print("Tensorboard not available: not logging progress")
+    # tb_writer = None
+    # if TENSORBOARD_FOUND:
+    tb_writer = SummaryWriter(args.model_path)
+    # else:
+    #     print("Tensorboard not available: not logging progress")
     return tb_writer
 
 def training_report(
@@ -1184,7 +1155,7 @@ def training_report(
 
     return best_iter, best_psnr
 
-def render_set(model_path, name, iteration, views, gaussians, pipeline, background):
+def render_set(model_path, name, iteration, views, gaussians, pipeline, background, cal_metric=False):
     render_path = os.path.join(model_path, name, "ours_{}".format(iteration), "renders")
     gts_path = os.path.join(model_path, name, "ours_{}".format(iteration), "gt")
     error_path = os.path.join(model_path, name, "ours_{}".format(iteration), "errors")
@@ -1200,6 +1171,11 @@ def render_set(model_path, name, iteration, views, gaussians, pipeline, backgrou
     # debug = 0
     t_list = []
     visible_count_list = []
+
+    psnrs = []
+    ssims = []
+    lpipss = []
+
     for idx, view in enumerate(tqdm(views, desc="Rendering progress")):
 
         torch.cuda.synchronize(); t0 = time.time()
@@ -1221,6 +1197,10 @@ def render_set(model_path, name, iteration, views, gaussians, pipeline, backgrou
         torchvision.utils.save_image(rendering, os.path.join(render_path, '{0:05d}'.format(idx) + ".png"))
         torchvision.utils.save_image(errormap, os.path.join(error_path, '{0:05d}'.format(idx) + ".png"))
         torchvision.utils.save_image(gt, os.path.join(gts_path, '{0:05d}'.format(idx) + ".png"))
+        if cal_metric:
+            psnrs.append(psnr(rendering, gt))
+            ssims.append(ssim(rendering, gt))
+            lpipss.append(lpips_fn(rendering, gt))
 
     t = np.array(t_list[5:])
     fps = 1.0 / t.mean()
@@ -1229,67 +1209,23 @@ def render_set(model_path, name, iteration, views, gaussians, pipeline, backgrou
     with open(os.path.join(model_path, name, "ours_{}".format(iteration), "per_view_count.json"), 'w') as fp:
         json.dump(per_view_dict, fp, indent=True)      
     
-    return t_list, visible_count_list
-    
-# def render_set(model_path, name, iteration, views, gaussians, pipeline, background):
-#     render_path = os.path.join(model_path, name, "ours_{}".format(iteration), "renders")
-#     error_path = os.path.join(model_path, name, "ours_{}".format(iteration), "errors")
-#     gts_path = os.path.join(model_path, name, "ours_{}".format(iteration), "gt")
-#     makedirs(render_path, exist_ok=True)
-#     makedirs(error_path, exist_ok=True)
-#     makedirs(gts_path, exist_ok=True)
-    
-#     t_list = []
-#     visible_count_list = []
-#     name_list = []
-#     per_view_dict = {}
-#     for idx, view in enumerate(tqdm(views, desc="Rendering save progress")):
-        
-#         torch.cuda.synchronize();t_start = time.time()
-        
-#         voxel_visible_mask = prefilter_voxel(view, gaussians, pipeline, background)
-#         torch.cuda.synchronize()
-#         rendersave(view, gaussians, pipeline, background, visible_mask=voxel_visible_mask, idx=idx)
-#         torch.cuda.synchronize();t_end = time.time()
-#         t_list.append(t_end - t_start)
+    if cal_metric:
+        ssim_val = torch.tensor(ssims).mean()
+        psnr_val = torch.stack(psnrs).mean()
+        lpips_val = torch.tensor(lpipss).mean()
 
-#     for idx, view in enumerate(tqdm(views, desc="Rendering load progress")):
-
-#         # renders
-#         torch.cuda.empty_cache()
-#         render_pkg = renderload(idx = idx)
-#         rendering = torch.clamp(render_pkg["render"], 0.0, 1.0)
-#         visible_count = (render_pkg["radii"] > 0).sum()
-#         visible_count_list.append(visible_count)
-
-
-#         # gts
-#         gt = view.original_image[0:3, :, :]
-        
-#         # error maps
-#         errormap = (rendering - gt).abs()
-
-
-#         name_list.append('{0:05d}'.format(idx) + ".png")
-#         torchvision.utils.save_image(rendering, os.path.join(render_path, '{0:05d}'.format(idx) + ".png"))
-#         torchvision.utils.save_image(errormap, os.path.join(error_path, '{0:05d}'.format(idx) + ".png"))
-#         torchvision.utils.save_image(gt, os.path.join(gts_path, '{0:05d}'.format(idx) + ".png"))
-#         per_view_dict['{0:05d}'.format(idx) + ".png"] = visible_count.item()
-#         torch.cuda.empty_cache()
-
-    
-#     with open(os.path.join(model_path, name, "ours_{}".format(iteration), "per_view_count.json"), 'w') as fp:
-#             json.dump(per_view_dict, fp, indent=True)
-    
-    # return t_list, visible_count_list
+        return t_list, visible_count_list, psnr_val.item(), ssim_val.item(), lpips_val.item()
+    else:
+        return t_list, visible_count_list, 0, 0, 0
 
 
 
-def render_sets(train_ds : ModelParams, iteration : int, pipeline : PipelineParams, skip_train=True, skip_test=False, wandb=None, tb_writer=None, dataset_name=None, logger=None, load_compressed=False):
+def render_sets(train_ds : ModelParams, iteration : int, pipeline : PipelineParams, skip_train=True, skip_test=False, wandb=None, tb_writer=None, dataset_name=None, logger=None, load_compressed=False, cal_metric=False):
     with torch.no_grad():
         dataset = copy.deepcopy(train_ds)
         dataset.mesongs = False
         dataset.raht = False
+        dataset.save_raht = False
         
         gaussians = GaussianModel(
             dataset.scene_name,
@@ -1299,7 +1235,7 @@ def render_sets(train_ds : ModelParams, iteration : int, pipeline : PipelinePara
             dataset.use_feat_bank, dataset.appearance_dim, 
             dataset.ratio, dataset.add_opacity_dist, 
             dataset.add_cov_dist, dataset.add_color_dist, 
-            raht=False, n_block=pipeline.n_block, unit_length=dataset.unit_length, 
+            raht=dataset.raht, n_block=pipeline.n_block, unit_length=dataset.unit_length, 
             use_pcc=dataset.use_pcc, logger=logger, enable_octree_training=False, enable_drop=dataset.enable_drop,
             bit_upper_bound=dataset.bit_upper_bound, bit_lower_bound=dataset.bit_lower_bound, save_raht=dataset.save_raht)
         scene = Scene(dataset, gaussians, load_iteration=iteration, shuffle=False, load_compressed=load_compressed)
@@ -1318,16 +1254,17 @@ def render_sets(train_ds : ModelParams, iteration : int, pipeline : PipelinePara
                 wandb.log({"train_fps":train_fps.item(), })
 
         if not skip_test:
-            t_test_list, visible_count = render_set(dataset.model_path, "test", scene.loaded_iter, scene.getTestCameras(), gaussians, pipeline, background)
+            t_test_list, visible_count, pp, ss, ll = render_set(dataset.model_path, "test", scene.loaded_iter, scene.getTestCameras(), gaussians, pipeline, background, cal_metric)
             test_fps = 1.0 / torch.tensor(t_test_list[5:]).mean()
             logger.info(f'Test FPS: \033[1;35m{test_fps.item():.5f}\033[0m')
             if tb_writer:
                 tb_writer.add_scalar(f'{dataset_name}/test_FPS', test_fps.item(), 0)
             if wandb is not None:
                 wandb.log({"test_fps":test_fps, })
-    
-    return visible_count
-
+    if cal_metric:
+        return visible_count, pp, ss, ll
+    else:
+        return visible_count
 
 def readImages(renders_dir, gt_dir):
     renders = []
@@ -1342,7 +1279,7 @@ def readImages(renders_dir, gt_dir):
     return renders, gts, image_names
 
 
-def evaluate(model_paths, visible_count=None, wandb=None, tb_writer=None, dataset_name=None, logger=None):
+def evaluate(model_paths, visible_count=None, wandb=None, tb_writer=None, dataset_name=None, logger=None, scene_name='', percent=0.01):
 
     full_dict = {}
     per_view_dict = {}
@@ -1358,6 +1295,11 @@ def evaluate(model_paths, visible_count=None, wandb=None, tb_writer=None, datase
 
     test_dir = Path(scene_dir) / "test"
 
+    best_psnr = 0
+    best_ss = 0
+    best_ll = 0
+    zip_size = 0
+    best_iter = 0
     for method in os.listdir(test_dir):
         cur_iter = method.split('_')[-1]
         full_dict[scene_dir][method] = {}
@@ -1384,11 +1326,13 @@ def evaluate(model_paths, visible_count=None, wandb=None, tb_writer=None, datase
             wandb.log({"test_PSNR_final":torch.stack(psnrs).mean().item(), })
             wandb.log({"test_LPIPS":torch.stack(lpipss).mean().item(), })
 
+        bytes_size = os.path.getsize(os.path.join(scene_dir, 'zip', f'iteration_{cur_iter}', 'bins.zip'))
         logger.info(f"model_paths: \033[1;35m{method_dir}\033[0m")
         logger.info("  SSIM : \033[1;35m{:>12.7f}\033[0m".format(torch.tensor(ssims).mean(), ".5"))
         logger.info("  PSNR : \033[1;35m{:>12.7f}\033[0m".format(torch.tensor(psnrs).mean(), ".5"))
         logger.info("  LPIPS: \033[1;35m{:>12.7f}\033[0m".format(torch.tensor(lpipss).mean(), ".5"))
-        logger.info("  SIZE: \033[1;35m{:>12.7f}\033[0m".format(os.path.getsize(os.path.join(scene_dir, 'zip', f'iteration_{cur_iter}', 'bins.zip')) / 1024 / 1024))
+        logger.info("  SIZE: \033[1;35m{:>12.7f}\033[0m".format(bytes_size / 1024 / 1024))
+        logger.info("  SIZE (bytes): \033[1;35m{:>12.7f}\033[0m".format(bytes_size))
         print("")
 
 
@@ -1399,9 +1343,22 @@ def evaluate(model_paths, visible_count=None, wandb=None, tb_writer=None, datase
             
             tb_writer.add_scalar(f'{dataset_name}/VISIBLE_NUMS', torch.tensor(visible_count).mean().item(), 0)
         
-        full_dict[scene_dir][method].update({"SSIM": torch.tensor(ssims).mean().item(),
-                                                "PSNR": torch.tensor(psnrs).mean().item(),
-                                                "LPIPS": torch.tensor(lpipss).mean().item()})
+        cur_psnr = torch.tensor(psnrs).mean().item()
+        curss = torch.tensor(ssims).mean().item()
+        curll = torch.tensor(lpipss).mean().item()
+        
+        if best_psnr < cur_psnr:
+            best_psnr = cur_psnr
+            best_ss = curss
+            best_ll = curll
+            best_iter = cur_iter
+            zip_size = bytes_size / 1024 / 1024
+            
+        full_dict[scene_dir][method].update({"SSIM": curss,
+                                                "PSNR": cur_psnr,
+                                                "LPIPS": curll,
+                                                "SIZE": bytes_size / 1024 / 1024, 
+                                                "SIZE (bytes)": bytes_size})
         per_view_dict[scene_dir][method].update({"SSIM": {name: ssim for ssim, name in zip(torch.tensor(ssims).tolist(), image_names)},
                                                     "PSNR": {name: psnr for psnr, name in zip(torch.tensor(psnrs).tolist(), image_names)},
                                                     "LPIPS": {name: lp for lp, name in zip(torch.tensor(lpipss).tolist(), image_names)},
@@ -1411,7 +1368,17 @@ def evaluate(model_paths, visible_count=None, wandb=None, tb_writer=None, datase
         json.dump(full_dict[scene_dir], fp, indent=True)
     with open(scene_dir + "/per_view.json", 'w') as fp:
         json.dump(per_view_dict[scene_dir], fp, indent=True)
-    
+    row = []
+    row.append(scene_name)
+    row.append(best_iter)
+    row.append(percent)
+    row.extend([best_psnr, best_ss, best_ll])
+    row.append(zip_size)
+    f = open(dataset.csv_path, 'a+')
+    wtr = csv.writer(f)
+    wtr.writerow(row)
+    f.close()
+        
 def get_logger(path):
     import logging
 
@@ -1442,7 +1409,7 @@ if __name__ == "__main__":
     parser.add_argument('--detect_anomaly', action='store_true', default=False)
     parser.add_argument('--warmup', action='store_true', default=False)
     parser.add_argument('--use_wandb', action='store_true', default=False)
-    parser.add_argument("--test_iterations", nargs="+", type=int, default=[200,400,600,700,800,900])
+    parser.add_argument("--test_iterations", nargs="+", type=int, default=[100,200,400,600,700,800,900])
     parser.add_argument("--save_iterations", nargs="+", type=int, default=[10, 100, 1000, 5000, 6000, 7000])
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument("--load_iter", default=30_000, type=int)
@@ -1468,15 +1435,15 @@ if __name__ == "__main__":
     #     os.system("echo $CUDA_VISIBLE_DEVICES")
     #     logger.info(f'using GPU {args.gpu}')
 
-        
-    dataset = args.source_path.split('/')[-1]
+    
+    dataset_name = args.source_path.split('/')[-1]
     exp_name = args.model_path.split('/')[-2]
     
     if args.use_wandb:
         wandb.login()
         run = wandb.init(
             # Set the project where this run will be logged
-            project=f"Scaffold-GS-{dataset}",
+            project=f"Scaffold-GS-{dataset_name}",
             name=exp_name,
             # Track hyperparameters and run metadata
             settings=wandb.Settings(start_method="fork"),
@@ -1490,8 +1457,11 @@ if __name__ == "__main__":
     # Initialize system state (RNG)
     safe_state(args.quiet)
 
+    dataset = lp.extract(args)
+    opt = op.extract(args)
+    pipe = pp.extract(args)
     # training
-    best_iteration = training(lp.extract(args), op.extract(args), pp.extract(args), dataset, 
+    best_iteration = training(dataset, opt, pipe, dataset_name, 
              args.test_iterations, args.save_iterations, args.checkpoint_iterations, args.start_checkpoint, args.debug_from, 
              args.load_iter, wandb, logger)
 
@@ -1504,17 +1474,21 @@ if __name__ == "__main__":
     logger.info("\nRendering complete.")
 
     # calc metrics
-    logger.info("\n Starting evaluation...")
-    evaluate(args.model_path, visible_count=visible_count, wandb=wandb, logger=logger)
-    logger.info("\nEvaluating complete.")
+    # logger.info("\n Starting evaluation...")
+    # evaluate(args.model_path, visible_count=visible_count, wandb=wandb, logger=logger)
+    # logger.info("\nEvaluating complete.")
 
     if best_iteration != 0:
-        # rendering best
         logger.info(f'\nStarting Rendering best~')
-        visible_count = render_sets(lp.extract(args), best_iteration, pp.extract(args), wandb=wandb, logger=logger, load_compressed=True)
+        visible_count = render_sets(lp.extract(args), 0, pp.extract(args), wandb=wandb, logger=logger, load_compressed=True)
         logger.info("\nRendering complete.")
+    
+    # rendering best
+    logger.info(f'\nStarting Rendering best~')
+    visible_count = render_sets(lp.extract(args), best_iteration, pp.extract(args), wandb=wandb, logger=logger, load_compressed=True)
+    logger.info("\nRendering complete.")
 
-        # calc metrics
-        logger.info("\n Starting evaluation...")
-        evaluate(args.model_path, visible_count=visible_count, wandb=wandb, logger=logger)
-        logger.info("\nEvaluating complete.")
+    # calc metrics
+    logger.info("\n Starting evaluation...")
+    evaluate(args.model_path, visible_count=visible_count, wandb=wandb, logger=logger, scene_name=dataset.scene_name, percent=dataset.percent)
+    logger.info("\nEvaluating complete.")

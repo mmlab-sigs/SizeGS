@@ -473,11 +473,11 @@ class SegQuant(Function):
             outputs
         )
         torch.cuda.synchronize()
-        return outputs
+        return outputs, min_vals, max_vals
     
     @staticmethod
     @custom_bwd
-    def backward(ctx, grad):
+    def backward(ctx, grad, grad_min_vals, grad_max_vals):
         return grad, None, None, None, None
 
 def pure_quant(
@@ -537,6 +537,8 @@ def pure_quant_wo_minmax(
     outputs = torch.zeros_like(inputs).int().contiguous() 
     scales = torch.zeros_like(cum_splits).float().contiguous() 
     zero_points = torch.zeros_like(cum_splits).float().contiguous() 
+    max_vals = torch.zeros_like(cum_splits).float().contiguous() 
+    min_vals = torch.zeros_like(cum_splits).float().contiguous() 
     
     segquant.quant_forward_wo_minmax(
         inputs, 
@@ -544,10 +546,12 @@ def pure_quant_wo_minmax(
         power_qbits,
         outputs,
         scales,
-        zero_points
+        zero_points,
+        max_vals,
+        min_vals
     )
     torch.cuda.synchronize()
-    return outputs, scales, zero_points
+    return outputs, scales, zero_points, max_vals, min_vals
 
 
 def quant_reverse(
@@ -600,12 +604,18 @@ class BatchQuant(nn.Module):
     def update_splits(self, splits: list):
         self.cum_splits = torch.cumsum(splits, dim=1).cuda().requires_grad_(False)
     
+    def update_qa(self, qbits):
+        qbits = torch.pow(2, qbits) - 1
+        self.qbits = qbits.to(torch.int32).requires_grad_(False)
+            
     def forward(self, inputs: torch.Tensor):
         inputs = inputs.transpose(0, 1)
         # assert inputs.shape[0] == self.channel_num 
         # print(inputs[0])
-        outputs = SegQuant.apply(inputs, self.cum_splits, self.qbits, self.min_vals, self.max_vals)
+        outputs, min_vals, max_vals = SegQuant.apply(inputs, self.cum_splits, self.qbits, self.min_vals, self.max_vals)
         # print(outputs[0])
+        self.min_vals = min_vals.detach()
+        self.max_vals = max_vals.detach()
         return outputs.transpose(0, 1)
 
 def cal_diff_wrapper(
@@ -664,6 +674,55 @@ def calculate_morton_order(x: torch.Tensor) -> torch.Tensor:
     indices_sorted = np.argsort(x @ np.power(x.max() + 1, np.arange(x.shape[1])), axis=0)
     indices_sorted = torch.tensor(indices_sorted, dtype=torch.long, device=device)
     return indices_sorted
+
+
+def cal_diff_square_wrapper(
+    channel_num: int,
+    block_num: int,
+    inputs: torch.Tensor, 
+    splits: torch.Tensor, 
+    qbits: torch.Tensor
+):
+    inputs = inputs.transpose(0, 1).float().contiguous() 
+    cum_splits = torch.cumsum(splits, dim=1).int().contiguous() # [C, B]
+    min_vals = torch.zeros([channel_num, block_num]).contiguous().cuda()
+    max_vals = torch.zeros([channel_num, block_num]).contiguous().cuda()
+    power_qbits = torch.pow(2, qbits).int().contiguous() - 1 # [C, B]
+    outputs = torch.zeros([channel_num, block_num]).contiguous().cuda()
+    segquant.cal_diff_square(
+        inputs, 
+        cum_splits,
+        power_qbits,
+        min_vals,
+        max_vals,
+        outputs
+    )
+    torch.cuda.synchronize()
+    return outputs
+
+def cal_diff_infinity_wrapper(
+    channel_num: int,
+    block_num: int,
+    inputs: torch.Tensor, 
+    splits: torch.Tensor, 
+    qbits: torch.Tensor
+):
+    inputs = inputs.transpose(0, 1).float().contiguous() 
+    cum_splits = torch.cumsum(splits, dim=1).int().contiguous() # [C, B]
+    min_vals = torch.zeros([channel_num, block_num]).contiguous().cuda()
+    max_vals = torch.zeros([channel_num, block_num]).contiguous().cuda()
+    power_qbits = torch.pow(2, qbits).int().contiguous() - 1 # [C, B]
+    outputs = torch.zeros([channel_num, block_num]).contiguous().cuda()
+    segquant.cal_diff_infinity(
+        inputs, 
+        cum_splits,
+        power_qbits,
+        min_vals,
+        max_vals,
+        outputs
+    )
+    torch.cuda.synchronize()
+    return outputs
 
 if __name__ == '__main__':
     x = np.load('/home/szxie/SizeGS/exp_data/C.npy')

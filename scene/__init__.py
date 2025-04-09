@@ -12,6 +12,7 @@
 import os
 import random
 import json
+import shutil
 from utils.system_utils import searchForMaxIteration
 from scene.dataset_readers import sceneLoadTypeCallbacks
 from scene.gaussian_model import GaussianModel
@@ -61,6 +62,7 @@ class Scene:
             print("Found transforms_train.json file, assuming Blender data set!")
             scene_info = sceneLoadTypeCallbacks["Blender"](args.source_path, args.white_background, args.eval, ply_path=ply_path)
         else:
+            print('args.source_path', args.source_path)
             assert False, "Could not recognize scene type!"
 
         self.gaussians.set_appearance(len(scene_info.train_cameras))
@@ -100,7 +102,7 @@ class Scene:
 
         if self.loaded_iter is not None:#
             if load_compressed:
-                print('Scene.py line 103, load from compressed file, path:', load_path)
+                # print('Scene.py line 103, load from compressed file, path:', load_path)
                 self.gaussians.load_compressed(os.path.join(load_path, 'zip', "iteration_" + str(self.loaded_iter)))#
             else:
                 self.gaussians.load_ply_sparse_gaussian(os.path.join(load_path,
@@ -121,14 +123,16 @@ class Scene:
         self.gaussians.save_ply(os.path.join(point_cloud_path, "point_cloud.ply"))
         self.gaussians.save_mlp_checkpoints(point_cloud_path)
     
-    def save_compressed(self, iteration, return_remain=False):
+    def save_compressed(self, iteration, return_path=False):
         os.makedirs(os.path.join(self.model_path, "zip"), exist_ok=True)
         save_dir = os.path.join(self.model_path, "zip/iteration_{}".format(iteration))
-        if return_remain:
-            save_size, remain_bytes = self.gaussians.save_compressed(save_dir, n_iter=iteration, return_remain=return_remain)
-            return save_size, remain_bytes 
+        if os.path.exists(save_dir):
+            shutil.rmtree(save_dir)
+        if return_path:
+            save_size, pt = self.gaussians.save_compressed(save_dir, n_iter=iteration, return_path=return_path, model_path=self.model_path)
+            return save_size, pt 
         else:
-            save_size = self.gaussians.save_compressed(save_dir, n_iter=iteration, return_remain=return_remain)
+            save_size = self.gaussians.save_compressed(save_dir, n_iter=iteration, return_path=return_path, model_path=self.model_path)
             return save_size 
 
     def save_oct_compressed(self, iteration):

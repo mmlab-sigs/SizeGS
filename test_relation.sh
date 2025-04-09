@@ -1,18 +1,20 @@
 #!/bin/bash
 
-name=$1
-iter=$2
-length=$3
-voxel=$4
-log=$5
-block=$6
-size=$7
-prune_per=0.5
+name=bicycle
+iter=0
+prune_iter=0
+octree_iter=0
+length=1000
+voxel=0.0001
+log=360_v2
+block=60
+size=24
+prune_per=0.6
 time=$(date "+%Y-%m-%d_%H:%M:%S")
-logdir=sizegs_gpcc
+logdir=test_fucking_size
 
 SECONDS=0
-CUDA_VISIBLE_DEVICES=0 python meson.py \
+CUDA_VISIBLE_DEVICES=1 python relation.py \
     --eval -s /mnt/storage/users/szxie_data/nerf_data/${log}/${name} \
     --lod 0 \
     --voxel_size ${voxel} \
@@ -33,13 +35,21 @@ CUDA_VISIBLE_DEVICES=0 python meson.py \
     --port 8989 \
     --n_block $block \
     --mesongs \
-    --raht \
+    --debug \
     --use_pcc \
     --percent $prune_per \
     --bit_upper_bound 16 \
     --bit_lower_bound 1 \
     --scene_name $name \
+    --enable_drop \
+    --prune_iterations $prune_iter \
+    --octree_iterations $octree_iter \
     --load_path outputs/${log}/${name}/baseline/scaffold \
     -m outputs/${log}/${name}/${logdir}/${time}
 duration=$SECONDS
 echo "$((duration / 60)) minutes and $((duration % 60)) seconds elapsed."
+
+    # --enable_drop \
+
+        # --raht \
+    # --save_raht \

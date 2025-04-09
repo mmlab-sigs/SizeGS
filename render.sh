@@ -4,11 +4,12 @@
 name=$1
 log=$2
 iter=$3
+loadpath=$4
 # 记录当前时间
-logdir=sizegs
+logdir=sizegs_gpcc_no_raht_v1
 
-python render.py \
-    --eval -s path/to/data/${log}/${name} \
+CUDA_VISIBLE_DEVICES=2 python render.py \
+    --eval -s ~/nerf_data/${log}/${name} \
     --lod 0 \
     --iteration $iter\
     --update_init_factor 4 \
@@ -19,6 +20,7 @@ python render.py \
     --debug \
     --skip_test \
     --name $name \
-    --load_path path/to/outputs/${log}/${name}/baseline/scaffold \
-    -m path/to/outputs/${log}/${name}/${logdir}/render \
-    --input_path path/to/outputs/${log}/${name}/${logdir}/render/train
+    --load_path $loadpath \
+    -m $loadpath
+
+# --input_path outputs/${log}/${name}/${logdir}/render/train
