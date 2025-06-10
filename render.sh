@@ -6,9 +6,9 @@ log=$2
 iter=$3
 loadpath=$4
 # 记录当前时间
-logdir=sizegs_gpcc_no_raht_v1
+logdir=aba_iterations_6000
 
-CUDA_VISIBLE_DEVICES=2 python render.py \
+CUDA_VISIBLE_DEVICES=3 python render.py \
     --eval -s ~/nerf_data/${log}/${name} \
     --lod 0 \
     --iteration $iter\
@@ -24,3 +24,4 @@ CUDA_VISIBLE_DEVICES=2 python render.py \
     -m $loadpath
 
 # --input_path outputs/${log}/${name}/${logdir}/render/train
+

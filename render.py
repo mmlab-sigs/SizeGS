@@ -20,6 +20,8 @@ from utils.image_utils import psnr
 from utils.quant_utils import split_length
 import subprocess
 from multiprocessing import Pool
+from utils.loss_utils import l1_loss, ssim
+
 # cmd = 'nvidia-smi -q -d Memory |grep -A4 GPU|grep Used'
 # result = subprocess.run(cmd, shell=True, stdout=subprocess.PIPE).stdout.decode().split('\n')
 # os.environ['CUDA_VISIBLE_DEVICES']=str(np.argmin([int(x.split()[2]) for x in result[:-1]]))
@@ -38,6 +40,8 @@ from argparse import ArgumentParser
 from arguments import ModelParams, PipelineParams, get_combined_args
 from gaussian_renderer import GaussianModel
 import torch.nn.functional as F 
+import lpips
+lpips_fn = lpips.LPIPS(net='vgg').to('cuda')
 
 def per_channel_qbit_upper(cha_qbits, qbit_size_limit):
     qbitsum = sum(cha_qbits)
@@ -218,6 +222,8 @@ def render_set(model_path, name, iteration, views, gaussians, pipeline, backgrou
     # debug = 0
     t_list = []
     psnrs = []
+    ssims = []
+    lpipss = []
     # psnrs.append(psnr(renders[idx], gts[idx]))
     for idx, view in enumerate(tqdm(views, desc="Rendering progress")):
 
@@ -231,6 +237,8 @@ def render_set(model_path, name, iteration, views, gaussians, pipeline, backgrou
         rendering = render_pkg["render"]
         gt = view.original_image[0:3, :, :]
         psnrs.append(psnr(rendering, gt))
+        ssims.append(ssim(rendering, gt))
+        lpipss.append(lpips_fn(rendering, gt))
         name_list.append('{0:05d}'.format(idx) + ".png")
         torchvision.utils.save_image(rendering, os.path.join(render_path, '{0:05d}'.format(idx) + ".png"))
         torchvision.utils.save_image(gt, os.path.join(gts_path, '{0:05d}'.format(idx) + ".png"))
@@ -240,8 +248,13 @@ def render_set(model_path, name, iteration, views, gaussians, pipeline, backgrou
     print(f'Test FPS: \033[1;35m{fps:.5f}\033[0m')
     print(f'PSNR {ave_psnr}')
 
+    ssim_val = torch.tensor(ssims).mean()
+    psnr_val = torch.stack(psnrs).mean()
+    lpips_val = torch.tensor(lpipss).mean()
+        
     with open(os.path.join(model_path, name, "ours_{}".format(iteration), "per_view_count.json"), 'w') as fp:
             json.dump(per_view_dict, fp, indent=True)      
+    print(psnr_val, ssim_val, lpips_val)
      
 def render_sets(dataset : ModelParams, iteration : int, pipeline : PipelineParams, skip_train : bool, skip_test : bool, logger, input_path : str = None, name : str = None):
   dataset.mesongs = False
@@ -274,39 +287,41 @@ def render_sets(dataset : ModelParams, iteration : int, pipeline : PipelineParam
         os.makedirs(dataset.model_path)
 
     render_set(dataset.model_path, "test", scene.loaded_iter, scene.getTestCameras(), gaussians, pipeline, background)
-
-    A = torch.tensor(np.load("ingredients/A.npy"), dtype=int, device="cuda")
-    final_qbits = torch.tensor(np.load("ingredients/final_qbits.npy"), dtype=int, device="cuda")
-    model_size_limit = (dataset.target_size - 2) * 1024 * 1024 * 8
-    splits = split_length(gaussians.n_rf, gaussians.n_block)
-    splits = torch.tensor([splits]*gaussians.n_channel, device='cuda', dtype=int)
-    cha_qbits = research_fine(
-        A,
-        final_qbits,
-        gaussians,
-        scene, 
-        model_size_limit,
-        gaussians.bit_lower_bound,
-        gaussians.n_bit,
-        n_block=gaussians.n_block,
-        enable_drop=True,
-        split=splits,
-    )
-    gaussians.update_bqa_wo_refresh(cha_qbits)
-    # scene.save_compressed(0)
-    zip_size, zip_path = scene.save_compressed(0, return_path=True)
-    gaussians.load_compressed(zip_path)
+    zip_path = os.path.join(dataset.model_path, 'zip', f'iteration_{iteration}', 'bins.zip')
+    sz = os.path.getsize(zip_path)
+    print(f'size: {sz / 1024 / 1024} MB')
+    # A = torch.tensor(np.load("ingredients/A.npy"), dtype=int, device="cuda")
+    # final_qbits = torch.tensor(np.load("ingredients/final_qbits.npy"), dtype=int, device="cuda")
+    # model_size_limit = (dataset.target_size - 2) * 1024 * 1024 * 8
+    # splits = split_length(gaussians.n_rf, gaussians.n_block)
+    # splits = torch.tensor([splits]*gaussians.n_channel, device='cuda', dtype=int)
+    # cha_qbits = research_fine(
+    #     A,
+    #     final_qbits,
+    #     gaussians,
+    #     scene, 
+    #     model_size_limit,
+    #     gaussians.bit_lower_bound,
+    #     gaussians.n_bit,
+    #     n_block=gaussians.n_block,
+    #     enable_drop=True,
+    #     split=splits,
+    # )
+    # gaussians.update_bqa_wo_refresh(cha_qbits)
+    # # scene.save_compressed(0)
+    # zip_size, zip_path = scene.save_compressed(0, return_path=True)
+    # gaussians.load_compressed(zip_path)
     
-    render_set(dataset.model_path, "test_adapt", scene.loaded_iter, scene.getTestCameras(), gaussians, pipeline, background)
+    # render_set(dataset.model_path, "test_adapt", scene.loaded_iter, scene.getTestCameras(), gaussians, pipeline, background)
     
-    if (not skip_train) and (input_path != "") and (input_path is not None):
-        cam_traj = generate_path(scene.getTrainCameras(), n_frames=480)
-        render_set(dataset.model_path, "train", scene.loaded_iter, cam_traj, gaussians, pipeline, background)
-        base_dir = 'videos_temp'
-        input_path = os.path.join(input_path, "ours_{}".format(scene.loaded_iter))
-        print(input_path)
-        name = f"{name}_{scene.loaded_iter}"
-        create_videos(base_dir, input_path, name) 
+    # if (not skip_train) and (input_path != "") and (input_path is not None):
+    #     cam_traj = generate_path(scene.getTrainCameras(), n_frames=480)
+    #     render_set(dataset.model_path, "train", scene.loaded_iter, cam_traj, gaussians, pipeline, background)
+    #     base_dir = 'videos_temp'
+    #     input_path = os.path.join(input_path, "ours_{}".format(scene.loaded_iter))
+    #     print(input_path)
+    #     name = f"{name}_{scene.loaded_iter}"
+    #     create_videos(base_dir, input_path, name) 
 
         
 def get_logger(path, iteration):

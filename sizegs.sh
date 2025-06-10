@@ -8,15 +8,16 @@ voxel=$5
 log=$6
 block=$7
 size=$8
-prune_per=0.6
+device=$9
+prune_per=${10}
 time=$(date "+%Y-%m-%d_%H:%M:%S")
-logdir=sizegs_gpcc_no_raht_v1
+logdir=sizegs_gpcc_rebuttal
 csv_path=exp_data/$log/$logdir.csv
 
 mkdir exp_data/${log}
 
 SECONDS=0
-CUDA_VISIBLE_DEVICES=0 python meson.py \
+CUDA_VISIBLE_DEVICES=$device python meson.py \
     --eval -s /mnt/storage/users/szxie_data/nerf_data/${log}/${name} \
     --lod 0 \
     --voxel_size ${voxel} \

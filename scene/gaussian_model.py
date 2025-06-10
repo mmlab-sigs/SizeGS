@@ -18,7 +18,7 @@ from torch import nn
 import os
 from utils.system_utils import mkdir_p
 from plyfile import PlyData, PlyElement
-from simple_knn._C import distCUDA2
+# from simple_knn._C import distCUDA2
 from utils.graphics_utils import BasicPointCloud
 from utils.general_utils import strip_symmetric, build_scaling_rotation
 from scene.embedding import Embedding
@@ -1007,8 +1007,10 @@ class GaussianModel:
             # finally, apply reverse raht to obtain features
             fe = self.apply_raht_reverse(V, fe, self.depth)
         
-
-        self._anchor = nn.Parameter(torch.tensor(dxyz, dtype=torch.float, device="cuda").requires_grad_(False))
+        if isinstance(dxyz, torch.Tensor):
+            self._anchor = nn.Parameter(dxyz.clone().cuda().requires_grad_(False))
+        else:
+            self._anchor = nn.Parameter(torch.tensor(dxyz, dtype=torch.float, device="cuda").requires_grad_(False))
         base = 0
         self._anchor_feat = nn.Parameter(fe[:, base:base + self.feat_dim].cuda().contiguous().requires_grad_(True))
         base += self.feat_dim #47
@@ -1538,7 +1540,7 @@ class GaussianModel:
 
     def set_dp_split(self, dp=True):
         if dp==False:
-            self.dp_split = torch.tensor([split_length(self.n_channel-1, self.n_block)]*73, dtype=int).cuda()
+            self.dp_split = torch.tensor([split_length(self.n_rf, self.n_block)]*73, dtype=int).cuda()
             return
         rf = torch.concat([
             self._anchor_feat_v.detach(), 
@@ -2151,15 +2153,15 @@ class GaussianModel:
             self.n_channel = C.shape[-1]
             npc = torch.tensor(C.detach().cpu().numpy(), dtype=torch.float32, device="cuda")
             # npc = C.clone().cuda()
-            self.logger.info("xxx npc shape {}, self.n_rf {}".format(npc.shape, self.n_rf))
+            # self.logger.info("xxx npc shape {}, self.n_rf {}".format(npc.shape, self.n_rf))
         A = []
         splits = torch.tensor([split_length(self.n_rf, self.n_block)] * self.n_channel, device="cuda")
         self.dp_split = splits.clone().cuda() 
-        self.logger.info("xxx npc shape {}, splits sum {}".format(npc.shape, torch.sum(splits[0])))
-        self.logger.info('splits.shape {}, device {}'.format(splits.shape, splits.get_device()))
+        # self.logger.info("xxx npc shape {}, splits sum {}".format(npc.shape, torch.sum(splits[0])))
+        # self.logger.info('splits.shape {}, device {}'.format(splits.shape, splits.get_device()))
         # self.logger.info(self.n_channel {}'.format(splits.shape))
         assert splits.shape[0] == self.n_channel
-        print('get_fine_grained_ddrf self.n_channel', self.n_channel)
+        # print('get_fine_grained_ddrf self.n_channel', self.n_channel)
         # [[int(j)] * self.n_channel]*self.n_block
         
         if dis_type == 1:
@@ -2168,7 +2170,7 @@ class GaussianModel:
             cal_diff_func = cal_diff_square_wrapper
         elif dis_type == 3:
             cal_diff_func = cal_diff_infinity_wrapper
-            
+        
         with torch.no_grad():
             for j in range(self.bit_lower_bound, self.bit_upper_bound + 1):
                 # np.save('exp_data/npc.npy', npc.cpu().numpy())
@@ -2190,7 +2192,7 @@ class GaussianModel:
         # np.save(f'exp_data/{self.scene_name}_A.npy', A.cpu().numpy())
         A = A.permute(1, 2, 0) # [C, B, n_bit]
         
-        self.logger.info('gaussian model get fg ddrf A sum {}'.format(torch.sum(A)))
+        # self.logger.info('gaussian model get fg ddrf A sum {}'.format(torch.sum(A)))
         # A_flat = A.flatten().cpu().tolist()  # 将展平后的张量转为 Python 列表
         B_flat = B.flatten().cpu().tolist()
         return A, B_flat, npc

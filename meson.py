@@ -48,9 +48,9 @@ from utils.image_utils import psnr
 from argparse import ArgumentParser, Namespace
 from arguments import ModelParams, PipelineParams, OptimizationParams
 from torch.utils.tensorboard import SummaryWriter
-import BDD.ILP_instance_py as ilp_instance
-from BDD.bdd_solver_py import bdd_solver as bdd_solver
-from BDD.bdd_solver_py import bdd_solver_options as bdd_solver_options
+# import BDD.ILP_instance_py as ilp_instance
+# from BDD.bdd_solver_py import bdd_solver as bdd_solver
+# from BDD.bdd_solver_py import bdd_solver_options as bdd_solver_options
 import numpy as np
 
 
@@ -256,170 +256,170 @@ def final_qbit_size_estimator(qbits, splits, n_channel, n_block, enable_drop: bo
             qbsz += qbits[i, j] * splits[i, j]
     return qbsz
 
-def solve_finer_01_ilp_problem(L, n_bit, low_bit, n_channel, n_block, splits, qbit_size):
-    n_variable = n_bit * n_channel * n_block
-    objective = {}
-    size_coni = {}
-    for i in range(n_variable):
-        objective[f"x{i}"] = L[i]
-        re = (i % n_bit) + 1
-        cbi = int(i // n_bit)
-        ci = int(cbi // n_block) 
-        bi = int(cbi % n_block)
-        coni_arg = re * int(splits[ci, bi].item()) / 8
-        size_coni[f"x{i}"] = coni_arg
+# def solve_finer_01_ilp_problem(L, n_bit, low_bit, n_channel, n_block, splits, qbit_size):
+#     n_variable = n_bit * n_channel * n_block
+#     objective = {}
+#     size_coni = {}
+#     for i in range(n_variable):
+#         objective[f"x{i}"] = L[i]
+#         re = (i % n_bit) + 1
+#         cbi = int(i // n_bit)
+#         ci = int(cbi // n_block) 
+#         bi = int(cbi % n_block)
+#         coni_arg = re * int(splits[ci, bi].item()) / 8
+#         size_coni[f"x{i}"] = coni_arg
         
-    constraints = []
-    # TODO: add size constraint
-    # n_cons = 1
-    constraints.append([
-        f'C1',
-        size_coni,
-        '<',
-        qbit_size
-    ])
-    for i in range(n_channel * n_block):
-        coni = [f'C{i+2}']
-        coni_dict = {}
-        for j in range(n_bit):
-            coni_dict[f"x{i*n_bit+j}"] = 1.0
-        coni.append(coni_dict)
-        coni.append('=')
-        coni.append(1.0)
-        # print(coni)
-        constraints.append(coni)
+#     constraints = []
+#     # TODO: add size constraint
+#     # n_cons = 1
+#     constraints.append([
+#         f'C1',
+#         size_coni,
+#         '<',
+#         qbit_size
+#     ])
+#     for i in range(n_channel * n_block):
+#         coni = [f'C{i+2}']
+#         coni_dict = {}
+#         for j in range(n_bit):
+#             coni_dict[f"x{i*n_bit+j}"] = 1.0
+#         coni.append(coni_dict)
+#         coni.append('=')
+#         coni.append(1.0)
+#         # print(coni)
+#         constraints.append(coni)
     
-    # objective = {'x1': 2.0, 'x2': 1.0, 'x3': -1.0, 'x4': 1.0, 'x5': -2.0, 'x6': -5.0}
-    # constraints = [
-    #     ['C1', {'x1': 1.0, 'x2': 1.0, 'x3': 1.0}, '=', 1.0],
-    #     ['C2', {'x3': 1.0, 'x4': 1.0, 'x5': 1.0}, '<', 1.0],
-    #     ['C3', {'x4': 1.0, 'x5': 1.0, 'x6': 1.0}, '>', 1.0]
-    # ]
-    ilp = ilp_instance.ILP_instance()
-    for var_name, coeff in objective.items():
-        ilp.add_new_variable_with_obj(var_name, coeff)
+#     # objective = {'x1': 2.0, 'x2': 1.0, 'x3': -1.0, 'x4': 1.0, 'x5': -2.0, 'x6': -5.0}
+#     # constraints = [
+#     #     ['C1', {'x1': 1.0, 'x2': 1.0, 'x3': 1.0}, '=', 1.0],
+#     #     ['C2', {'x3': 1.0, 'x4': 1.0, 'x5': 1.0}, '<', 1.0],
+#     #     ['C3', {'x4': 1.0, 'x5': 1.0, 'x6': 1.0}, '>', 1.0]
+#     # ]
+#     ilp = ilp_instance.ILP_instance()
+#     for var_name, coeff in objective.items():
+#         ilp.add_new_variable_with_obj(var_name, coeff)
 
-    for con in constraints:
-        con_name = con[0]
-        con_vars = list(con[1].keys())
-        con_coeffs = list(con[1].values())
-        con_coeffs = [int(c) for c in con_coeffs] # Only integer coefficients are supported.
-        con_sense = con[2]
-        rhs_value = int(con[3]) # Only integer right hand side value is supported.
-        if con_sense == '=':
-            ineq_type = ilp_instance.equal
-        elif con_sense == '<':
-            ineq_type = ilp_instance.smaller_equal
-        else:
-            assert(con_sense == '>')
-            ineq_type = ilp_instance.greater_equal
-        ilp.add_new_constraint(con_name, con_vars, con_coeffs, rhs_value, ineq_type)
+#     for con in constraints:
+#         con_name = con[0]
+#         con_vars = list(con[1].keys())
+#         con_coeffs = list(con[1].values())
+#         con_coeffs = [int(c) for c in con_coeffs] # Only integer coefficients are supported.
+#         con_sense = con[2]
+#         rhs_value = int(con[3]) # Only integer right hand side value is supported.
+#         if con_sense == '=':
+#             ineq_type = ilp_instance.equal
+#         elif con_sense == '<':
+#             ineq_type = ilp_instance.smaller_equal
+#         else:
+#             assert(con_sense == '>')
+#             ineq_type = ilp_instance.greater_equal
+#         ilp.add_new_constraint(con_name, con_vars, con_coeffs, rhs_value, ineq_type)
     
-    # passing ilp instance to solver options
-    opts = bdd_solver_options(ilp)
-    # this setting enables finding a primal feasible solution. If this is false only a lower bound will be computed.
-    opts.incremental_primal_rounding = True
-    # initialize solver
-    solver = bdd_solver(opts)
-    # solve dual problem
-    solver.solve_dual()
-    lower_bound = solver.lower_bound()
-    # run primal heuristic
-    upper_bound, sol = solver.round()
-    # extracting the solution as a numpy array
-    sol_numpy = np.array(sol)
+#     # passing ilp instance to solver options
+#     opts = bdd_solver_options(ilp)
+#     # this setting enables finding a primal feasible solution. If this is false only a lower bound will be computed.
+#     opts.incremental_primal_rounding = True
+#     # initialize solver
+#     solver = bdd_solver(opts)
+#     # solve dual problem
+#     solver.solve_dual()
+#     lower_bound = solver.lower_bound()
+#     # run primal heuristic
+#     upper_bound, sol = solver.round()
+#     # extracting the solution as a numpy array
+#     sol_numpy = np.array(sol)
     
-    sol_tensor = torch.tensor(sol).reshape(n_channel, n_block, n_bit)
-    # print(sol_numpy)
-    sol_tensor_sum = torch.sum(sol_tensor, dim=-1)
-    # print('diff 1', torch.sum(torch.square(sol_tensor_sum - torch.ones_like(sol_tensor_sum))))
+#     sol_tensor = torch.tensor(sol).reshape(n_channel, n_block, n_bit)
+#     # print(sol_numpy)
+#     sol_tensor_sum = torch.sum(sol_tensor, dim=-1)
+#     # print('diff 1', torch.sum(torch.square(sol_tensor_sum - torch.ones_like(sol_tensor_sum))))
 
-    qbits = np.zeros([n_channel, n_block]).astype(int)
-    for i in range(n_channel):
-        for j in range(n_block):
-            for k in range(n_bit):
-                if sol_numpy[i*n_block*n_bit + j*n_bit + k] != 0:
-                    qbits[i, j] = k+low_bit
+#     qbits = np.zeros([n_channel, n_block]).astype(int)
+#     for i in range(n_channel):
+#         for j in range(n_block):
+#             for k in range(n_bit):
+#                 if sol_numpy[i*n_block*n_bit + j*n_bit + k] != 0:
+#                     qbits[i, j] = k+low_bit
                     
-    return qbits
+#     return qbits
 
-def solve_coarse_01_ilp_problem(L, n_bit, low_bit, n_channel, n_point, qbit_size):
-    n_variable = n_bit * n_channel
-    objective = {}
-    size_coni = {}
-    assert len(L) == n_variable, "false L length"
-    for i in range(n_variable):
-        objective[f"x{i}"] = L[i]
-        re = (i % n_bit) + 1
-        coni_arg = re * (n_point - 1)
-        size_coni[f"x{i}"] = coni_arg
+# def solve_coarse_01_ilp_problem(L, n_bit, low_bit, n_channel, n_point, qbit_size):
+#     n_variable = n_bit * n_channel
+#     objective = {}
+#     size_coni = {}
+#     assert len(L) == n_variable, "false L length"
+#     for i in range(n_variable):
+#         objective[f"x{i}"] = L[i]
+#         re = (i % n_bit) + 1
+#         coni_arg = re * (n_point - 1)
+#         size_coni[f"x{i}"] = coni_arg
         
-    constraints = []
-    constraints.append([
-        f'C1',
-        size_coni,
-        '<',
-        qbit_size
-    ])
-    # TODO: add size constraint
-    # n_cons = 1
-    for i in range(n_channel):
-        coni = [f'C{i+2}']
-        coni_dict = {}
-        for j in range(n_bit):
-            coni_dict[f"x{i*n_bit+j}"] = 1
-        coni.append(coni_dict)
-        coni.append('=')
-        coni.append(1)
-        # print(coni)
-        constraints.append(coni)
+#     constraints = []
+#     constraints.append([
+#         f'C1',
+#         size_coni,
+#         '<',
+#         qbit_size
+#     ])
+#     # TODO: add size constraint
+#     # n_cons = 1
+#     for i in range(n_channel):
+#         coni = [f'C{i+2}']
+#         coni_dict = {}
+#         for j in range(n_bit):
+#             coni_dict[f"x{i*n_bit+j}"] = 1
+#         coni.append(coni_dict)
+#         coni.append('=')
+#         coni.append(1)
+#         # print(coni)
+#         constraints.append(coni)
     
-    ilp = ilp_instance.ILP_instance()
-    for var_name, coeff in objective.items():
-        ilp.add_new_variable_with_obj(var_name, coeff)
+#     ilp = ilp_instance.ILP_instance()
+#     for var_name, coeff in objective.items():
+#         ilp.add_new_variable_with_obj(var_name, coeff)
 
-    for con in constraints:
-        con_name = con[0]
-        con_vars = list(con[1].keys())
-        con_coeffs = list(con[1].values())
-        con_coeffs = [int(c) for c in con_coeffs] # Only integer coefficients are supported.
-        con_sense = con[2]
-        rhs_value = int(con[3]) # Only integer right hand side value is supported.
-        if con_sense == '=':
-            ineq_type = ilp_instance.equal
-        elif con_sense == '<':
-            ineq_type = ilp_instance.smaller_equal
-        else:
-            assert(con_sense == '>')
-            ineq_type = ilp_instance.greater_equal
-        ilp.add_new_constraint(con_name, con_vars, con_coeffs, rhs_value, ineq_type)
+#     for con in constraints:
+#         con_name = con[0]
+#         con_vars = list(con[1].keys())
+#         con_coeffs = list(con[1].values())
+#         con_coeffs = [int(c) for c in con_coeffs] # Only integer coefficients are supported.
+#         con_sense = con[2]
+#         rhs_value = int(con[3]) # Only integer right hand side value is supported.
+#         if con_sense == '=':
+#             ineq_type = ilp_instance.equal
+#         elif con_sense == '<':
+#             ineq_type = ilp_instance.smaller_equal
+#         else:
+#             assert(con_sense == '>')
+#             ineq_type = ilp_instance.greater_equal
+#         ilp.add_new_constraint(con_name, con_vars, con_coeffs, rhs_value, ineq_type)
     
-    # passing ilp instance to solver options
-    opts = bdd_solver_options(ilp)
-    # this setting enables finding a primal feasible solution. If this is false only a lower bound will be computed.
-    opts.incremental_primal_rounding = True
-    # initialize solver
-    solver = bdd_solver(opts)
-    # solve dual problem
-    solver.solve_dual()
-    lower_bound = solver.lower_bound()
-    # run primal heuristic
-    upper_bound, sol = solver.round()
-    # extracting the solution as a numpy array
-    sol_numpy = np.array(sol)
+#     # passing ilp instance to solver options
+#     opts = bdd_solver_options(ilp)
+#     # this setting enables finding a primal feasible solution. If this is false only a lower bound will be computed.
+#     opts.incremental_primal_rounding = True
+#     # initialize solver
+#     solver = bdd_solver(opts)
+#     # solve dual problem
+#     solver.solve_dual()
+#     lower_bound = solver.lower_bound()
+#     # run primal heuristic
+#     upper_bound, sol = solver.round()
+#     # extracting the solution as a numpy array
+#     sol_numpy = np.array(sol)
     
-    sol_tensor = torch.tensor(sol).reshape(n_channel, n_bit)
-    # print(sol_numpy)
-    sol_tensor_sum = torch.sum(sol_tensor, dim=-1)
-    # print('diff 1', torch.sum(torch.square(sol_tensor_sum - torch.ones_like(sol_tensor_sum))))
+#     sol_tensor = torch.tensor(sol).reshape(n_channel, n_bit)
+#     # print(sol_numpy)
+#     sol_tensor_sum = torch.sum(sol_tensor, dim=-1)
+#     # print('diff 1', torch.sum(torch.square(sol_tensor_sum - torch.ones_like(sol_tensor_sum))))
 
-    qbits = np.zeros(n_channel).astype(int)
-    for i in range(n_channel):
-        for k in range(n_bit):
-            if sol_numpy[i*n_bit + k] != 0:
-                qbits[i] = k+low_bit
+#     qbits = np.zeros(n_channel).astype(int)
+#     for i in range(n_channel):
+#         for k in range(n_bit):
+#             if sol_numpy[i*n_bit + k] != 0:
+#                 qbits[i] = k+low_bit
     
-    return qbits
+#     return qbits
 
 def solve_coarse_ilp_pulp(
     L, rf, n_bit, low_bit, n_channel, n_block, n_rf, 
@@ -626,6 +626,7 @@ def training(dataset: ModelParams, opt, pipe, dataset_name, testing_iterations, 
     # dp=False
     logger.info("start prune warm up training")
     
+    finetune_time = 0
     # warm up
     for iteration in range(first_iter, opt.prune_iterations+1):
         iter_start.record()
@@ -637,7 +638,7 @@ def training(dataset: ModelParams, opt, pipe, dataset_name, testing_iterations, 
         viewpoint_cam = viewpoint_stack.pop(randint(0, len(viewpoint_stack)-1))
         
         voxel_visible_mask = prefilter_voxel(viewpoint_cam, gaussians, pipe, background, training=True)
-                
+        
         render_pkg = render(
             viewpoint_cam,
             gaussians,
@@ -669,7 +670,8 @@ def training(dataset: ModelParams, opt, pipe, dataset_name, testing_iterations, 
                 progress_bar.update(10)
             if iteration == opt.prune_iterations:
                 progress_bar.close()
-
+            elapsed_time = iter_start.elapsed_time(iter_end)
+            finetune_time += elapsed_time
             # Log and save
             training_report(
                 tb_writer, 
@@ -678,7 +680,7 @@ def training(dataset: ModelParams, opt, pipe, dataset_name, testing_iterations, 
                 Ll1, 
                 loss, 
                 l1_loss, 
-                iter_start.elapsed_time(iter_end), 
+                elapsed_time, 
                 [500, 1000, 1500, 2000], 
                 scene, 
                 render, 
@@ -764,8 +766,10 @@ def training(dataset: ModelParams, opt, pipe, dataset_name, testing_iterations, 
             if iteration == opt.octree_iterations:
                 progress_bar.close()
 
+            elapsed_time = iter_start.elapsed_time(iter_end)
+            finetune_time += elapsed_time
             # Log and save
-            training_report(tb_writer, dataset_name, iteration, Ll1, loss, l1_loss, iter_start.elapsed_time(iter_end), [500, 1000, 1500, 2000], scene, render, (pipe, background), wandb, logger)
+            training_report(tb_writer, dataset_name, iteration, Ll1, loss, l1_loss, elapsed_time, [500, 1000, 1500, 2000], scene, render, (pipe, background), wandb, logger)
                     
             # Optimizer step
             if iteration < opt.octree_iterations:
@@ -778,11 +782,17 @@ def training(dataset: ModelParams, opt, pipe, dataset_name, testing_iterations, 
     # disable xyz update
     gaussians.disable_anchor_update()
     logger.info("after octree init disable anchor update")
+    bg = time.time()
+    st = time.time() 
     A, B, rf = gaussians.get_fine_grained_ddrf(dis_type=dataset.dis_type)
+    omega_time = time.time() - bg
     os.makedirs(os.path.join(scene.model_path, "ingredients"), exist_ok=True)
     np.save(os.path.join(scene.model_path, "ingredients", 'A.npy'), A.cpu().numpy())
     
+    save_time = 0
+    ilp_time = 0
     '''before search'''
+    bg = time.time()
     if dataset.enable_drop:
         n_c = gaussians.n_channel - 3
         gaussians.init_bqa(qbits=torch.ones([n_c, gaussians.n_block])*8)
@@ -796,16 +806,17 @@ def training(dataset: ModelParams, opt, pipe, dataset_name, testing_iterations, 
     model_size_limit = dataset.target_size*1024*1024*8
     delta_bits = model_size_limit - save_bits 
     qbit_size_limit = est_qbit_sz + delta_bits
+    save_time += (time.time() - bg)
     logger.info("model size limit: {} bits, {} MB".format(model_size_limit, model_size_limit/1024/1024/8))
     
     td = True
     if td:
-        br = time.time()
         warmup = False
         last_vals = None
         actual_sizes =[]
         qbit_size_limits = []
         for i in range(4):
+            bg = time.time()
             cha_qbits, last_vals = solve_coarse_ilp_pulp(
                 B,
                 rf,
@@ -818,15 +829,18 @@ def training(dataset: ModelParams, opt, pipe, dataset_name, testing_iterations, 
                 splits=gaussians.dp_split,
                 enable_drop = dataset.enable_drop,
                 use_entropy = dataset.use_entropy,
-                time_limit=200,
+                time_limit=30,
                 warmup=warmup,
                 vals=last_vals
             )
+            ilp_time += (time.time() - bg)
             logger.info(f"{i} qbit_size_limit: {qbit_size_limit / 8 } bytes")
             warmup=True
             logger.info(f"cha_qbits: {cha_qbits}")
+            bg = time.time()
             gaussians.update_bqa(qbits=torch.tensor(cha_qbits, device="cuda").reshape(-1, 1).repeat(1, gaussians.n_block))
             actual_size = scene.save_compressed(0) * 8 # bits
+            save_time += (time.time() - bg)
             if i > 0:
                 delta_actual_size = actual_size - actual_sizes[-1] + 0.1
                 delta_qbit_limit = qbit_size_limit - qbit_size_limits[-1] + 0.1
@@ -870,6 +884,7 @@ def training(dataset: ModelParams, opt, pipe, dataset_name, testing_iterations, 
             actual_sizes =[]
             qbit_size_limits = []
             for j in range(4):
+                bg = time.time()
                 per_channel_size_limit = per_channel_qbit_upper(cha_qbits, qbit_size_limit)
                 if dataset.enable_drop:
                     assert len(per_channel_size_limit) == 70
@@ -893,6 +908,8 @@ def training(dataset: ModelParams, opt, pipe, dataset_name, testing_iterations, 
                 with Pool() as pool:  # 自动使用所有CPU核心
                     results = pool.map(solve_wrapper, args_list)
                 
+                ilp_time += (time.time() - bg)
+
                 final_qbits = [torch.tensor(res[0], device="cuda", dtype=int) for res in results] 
                 last_vals = [res[1] for res in results]     
                 # logger.info("last_vals {}".format(last_vals))       
@@ -900,9 +917,11 @@ def training(dataset: ModelParams, opt, pipe, dataset_name, testing_iterations, 
                 # logger.info("final_qbits {}".format(final_qbits))  
                 logger.info(f"{j} qbit_size_limit: {qbit_size_limit / 8 } bytes")
                 
+                bg = time.time()
                 warmup=True
                 gaussians.update_bqa(qbits=final_qbits)
                 actual_size = scene.save_compressed(0) * 8 # bits
+                save_time += (time.time() - bg)
                 
                 if j > 0:
                     delta_actual_size = actual_size - actual_sizes[-1] + 0.1
@@ -927,15 +946,17 @@ def training(dataset: ModelParams, opt, pipe, dataset_name, testing_iterations, 
                 # logger.info(f"{j} delta_size: {delta_size / 8 / 1024/1024}")
                 # logger.info(f"{j} qbit_size_limit: {qbit_size_limit / 8 / 1024/1024} MB, {qbit_size_limit} bits")
                 
-            
+        
         final_qbit_est_size = final_qbit_size_estimator(final_qbits, gaussians.dp_split, gaussians.n_channel, gaussians.n_block, dataset.enable_drop)
         # print('final_qbits.shape', final_qbits.shape)
         logger.info('final_qbit_est_size: {}'.format(final_qbit_est_size))
         np.save(os.path.join(scene.model_path, "ingredients", 'final_qbits.npy'), final_qbits.cpu().numpy())
-        logger.info('searching time: {} mins'.format((time.time() - br) / 60))
+        # logger.info('searching time: {} mins'.format((time.time() - br) / 60))
     else:
         final_qbits = torch.tensor(np.load('exp_data/final_qbits.npy'), device="cuda", dtype=int)
-
+    
+    
+    # return 0
     gaussians.init_bqa(final_qbits)
     gaussians.training_setup(opt)
     gaussians.train()
@@ -968,7 +989,7 @@ def training(dataset: ModelParams, opt, pipe, dataset_name, testing_iterations, 
     best_psnr = 0.
     logger.info("start Training")
     
-    new_test_iters = np.arange(0, opt.iterations, 200).tolist()
+    new_test_iters = np.arange(opt.iterations - 1000, opt.iterations + 1, 200).tolist()
     testing_iterations.extend(new_test_iters)
     testing_iterations = np.unique(testing_iterations).tolist()
     logger.info('testing iterations: {}'.format(testing_iterations))
@@ -1028,6 +1049,8 @@ def training(dataset: ModelParams, opt, pipe, dataset_name, testing_iterations, 
             if iteration == opt.iterations:
                 progress_bar.close()
 
+            elapsed_t = iter_start.elapsed_time(iter_end)
+            finetune_time += elapsed_t
             # Log and save
             best_iter, best_psnr = training_report(
                 tb_writer, dataset_name, iteration, Ll1, loss, l1_loss, 
@@ -1054,6 +1077,11 @@ def training(dataset: ModelParams, opt, pipe, dataset_name, testing_iterations, 
                 torch.save((gaussians.capture(), iteration), scene.model_path + "/chkpnt" + str(iteration) + ".pth")
         writer.add_scalar('training loss', loss.item(), iteration + offset_iteration)
     writer.close()
+    
+    full_time = time.time() - st
+    with open('exp_data/time.txt', 'a+') as f:
+        f.write(f'{dataset.scene_name},{omega_time},{save_time},{ilp_time},{finetune_time},{full_time}\n')
+    
     return best_iter
 
 def prepare_output_and_logger(args):    
@@ -1409,7 +1437,7 @@ if __name__ == "__main__":
     parser.add_argument('--detect_anomaly', action='store_true', default=False)
     parser.add_argument('--warmup', action='store_true', default=False)
     parser.add_argument('--use_wandb', action='store_true', default=False)
-    parser.add_argument("--test_iterations", nargs="+", type=int, default=[100,200,400,600,700,800,900])
+    parser.add_argument("--test_iterations", nargs="+", type=int, default=[100,1000])
     parser.add_argument("--save_iterations", nargs="+", type=int, default=[10, 100, 1000, 5000, 6000, 7000])
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument("--load_iter", default=30_000, type=int)
@@ -1468,10 +1496,10 @@ if __name__ == "__main__":
     # All done
     logger.info("\nTraining complete.")
 
-    # rendering
-    logger.info(f'\nStarting Rendering~')
-    visible_count = render_sets(lp.extract(args), -1, pp.extract(args), wandb=wandb, logger=logger, load_compressed=True)
-    logger.info("\nRendering complete.")
+    # # rendering
+    # logger.info(f'\nStarting Rendering~')
+    # visible_count = render_sets(lp.extract(args), -1, pp.extract(args), wandb=wandb, logger=logger, load_compressed=True)
+    # logger.info("\nRendering complete.")
 
     # calc metrics
     # logger.info("\n Starting evaluation...")
