@@ -97,6 +97,7 @@ class ModelParams(ParamGroup):
         self.newsize=16
         self.dis_type=3
         self.csv_path=""
+        self.fluc_percent = 0.05
         super().__init__(parser, "Loading Parameters", sentinel)
 
     def extract(self, args):

@@ -860,7 +860,7 @@ def training(dataset: ModelParams, opt, pipe, dataset_name, testing_iterations, 
                 delta_qbit = model_size_limit - actual_size
             qbit_size_limit = qbit_size_limit + delta_qbit
             logger.info(f"{i} actual size: {actual_size / 8 / 1024/1024} MB {actual_size / 8} B")
-            if abs(actual_size - model_size_limit) / model_size_limit < 0.05:
+            if abs(actual_size - model_size_limit) / model_size_limit < dataset.fluc_percent:
                 break
             # logger.info(f"{i} estimate_size: {estimate_size / 8 / 1024/1024}")
             # logger.info(f"{i} delta_size: {delta_size / 8 / 1024/1024}")
@@ -940,7 +940,7 @@ def training(dataset: ModelParams, opt, pipe, dataset_name, testing_iterations, 
                 qbit_size_limit = qbit_size_limit + delta_qbit
                 
                 logger.info(f"{j} actual size: {actual_size / 8 / 1024/1024} {actual_size / 8} B")
-                if abs(actual_size - model_size_limit) / model_size_limit < 0.05:
+                if abs(actual_size - model_size_limit) / model_size_limit < dataset.fluc_percent:
                     break
                 # logger.info(f"{j} estimate_size: {estimate_size / 8 / 1024/1024}")
                 # logger.info(f"{j} delta_size: {delta_size / 8 / 1024/1024}")
@@ -1079,7 +1079,7 @@ def training(dataset: ModelParams, opt, pipe, dataset_name, testing_iterations, 
     writer.close()
     
     full_time = time.time() - st
-    with open('exp_data/time.txt', 'a+') as f:
+    with open('outputs/0_exp_data/time.txt', 'a+') as f:
         f.write(f'{dataset.scene_name},{omega_time},{save_time},{ilp_time},{finetune_time},{full_time}\n')
     
     return best_iter
@@ -1495,7 +1495,7 @@ if __name__ == "__main__":
 
     # All done
     logger.info("\nTraining complete.")
-
+    logger.info(f"\nFluc percent {dataset.fluc_percent}")
     # # rendering
     # logger.info(f'\nStarting Rendering~')
     # visible_count = render_sets(lp.extract(args), -1, pp.extract(args), wandb=wandb, logger=logger, load_compressed=True)

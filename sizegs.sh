@@ -10,11 +10,12 @@ block=$7
 size=$8
 device=$9
 prune_per=${10}
+fluc_percent=${11}
 time=$(date "+%Y-%m-%d_%H:%M:%S")
 logdir=sizegs_gpcc_rebuttal
-csv_path=exp_data/$log/$logdir.csv
+csv_path=outputs/0_exp_data/$log/$logdir.csv
 
-mkdir exp_data/${log}
+mkdir outputs/0_exp_data/${log}
 
 SECONDS=0
 CUDA_VISIBLE_DEVICES=$device python meson.py \
@@ -47,6 +48,7 @@ CUDA_VISIBLE_DEVICES=$device python meson.py \
     --scene_name $name \
     --dis_type 3 \
     --csv_path $csv_path \
+    --fluc_percent $fluc_percent \
     --load_path outputs/${log}/${name}/baseline/scaffold \
     -m outputs/${log}/${name}/${logdir}/${time}
 duration=$SECONDS
@@ -54,4 +56,4 @@ echo "$((duration / 60)) minutes and $((duration % 60)) seconds elapsed."
 
     # --raht \
     # --save_raht \
-    # --use_coarse_bit_only \ß
+    # --use_coarse_bit_only \
