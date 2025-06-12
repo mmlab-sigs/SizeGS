@@ -560,7 +560,7 @@ def training(dataset: ModelParams, opt, pipe, dataset_name, testing_iterations, 
     if not os.path.exists(dataset.csv_path):
         f = open(dataset.csv_path, 'a+')
         wtr = csv.writer(f)
-        wtr.writerow(['name', 'iteration', 'percent', 'psnr', 'ssim', 'lpips', 'size'])
+        wtr.writerow(['name', 'iteration', 'percent', 'fluc', 'psnr', 'ssim', 'lpips', 'size'])
         f.close()
     
     first_iter = 0
@@ -1307,7 +1307,7 @@ def readImages(renders_dir, gt_dir):
     return renders, gts, image_names
 
 
-def evaluate(model_paths, visible_count=None, wandb=None, tb_writer=None, dataset_name=None, logger=None, scene_name='', percent=0.01):
+def evaluate(model_paths, visible_count=None, wandb=None, tb_writer=None, dataset_name=None, logger=None, scene_name='', percent=0.01, fluc_percent=0.05):
 
     full_dict = {}
     per_view_dict = {}
@@ -1400,6 +1400,7 @@ def evaluate(model_paths, visible_count=None, wandb=None, tb_writer=None, datase
     row.append(scene_name)
     row.append(best_iter)
     row.append(percent)
+    row.append(fluc_percent)
     row.extend([best_psnr, best_ss, best_ll])
     row.append(zip_size)
     f = open(dataset.csv_path, 'a+')
@@ -1518,5 +1519,5 @@ if __name__ == "__main__":
 
     # calc metrics
     logger.info("\n Starting evaluation...")
-    evaluate(args.model_path, visible_count=visible_count, wandb=wandb, logger=logger, scene_name=dataset.scene_name, percent=dataset.percent)
+    evaluate(args.model_path, visible_count=visible_count, wandb=wandb, logger=logger, scene_name=dataset.scene_name, percent=dataset.percent, fluc_percent=dataset.fluc_percent)
     logger.info("\nEvaluating complete.")

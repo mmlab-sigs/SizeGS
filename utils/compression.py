@@ -282,7 +282,7 @@ def sorted_voxels(voxelized_means: np.ndarray, other_params = None) -> Union[np.
     return voxelized_means, other_params, indices_sorted
 
 
-def gpcc_encode(ply_path: str, bin_path: str, encoder_path='~/mpeg-pcc-tmc13/build/tmc3/tmc3') -> None:
+def gpcc_encode(ply_path: str, bin_path: str, encoder_path='~/storage/mpeg-pcc-tmc13/build/tmc3/tmc3') -> None:
     """
     Compress geometry point cloud by GPCC codec.
     """
@@ -296,7 +296,7 @@ def gpcc_encode(ply_path: str, bin_path: str, encoder_path='~/mpeg-pcc-tmc13/bui
     assert exit_code == 0, f'GPCC encoder failed with exit code {exit_code}.'
 
 
-def gpcc_decode(bin_path: str, recon_path: str, decoder_path='~/mpeg-pcc-tmc13/build/tmc3/tmc3') -> None:
+def gpcc_decode(bin_path: str, recon_path: str, decoder_path='~/storage/mpeg-pcc-tmc13/build/tmc3/tmc3') -> None:
     """
     Decompress geometry point cloud by GPCC codec.
     """
@@ -334,7 +334,7 @@ def read_ply_geo_bin(ply_path: str) -> np.ndarray:
     means = np.stack([ply_data.data[name] for name in ['x', 'y', 'z']], axis=1)  # shape (N, 3)
     return means
 
-def compress_gpcc(x: torch.Tensor, gpcc_codec_path: str='~/mpeg-pcc-tmc13/build/tmc3/tmc3') -> bytes:
+def compress_gpcc(x: torch.Tensor, gpcc_codec_path: str='~/storage/mpeg-pcc-tmc13/build/tmc3/tmc3') -> bytes:
     """
     Compress geometry point cloud by GPCC codec.
     """
@@ -349,7 +349,7 @@ def compress_gpcc(x: torch.Tensor, gpcc_codec_path: str='~/mpeg-pcc-tmc13/build/
             strings = f.read()
     return strings
 
-def decompress_gpcc(strings: bytes, gpcc_codec_path: str='~/mpeg-pcc-tmc13/build/tmc3/tmc3') -> torch.Tensor:
+def decompress_gpcc(strings: bytes, gpcc_codec_path: str='~/storage/mpeg-pcc-tmc13/build/tmc3/tmc3') -> torch.Tensor:
     """
     Decompress geometry point cloud by GPCC codec.
     """

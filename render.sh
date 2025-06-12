@@ -25,3 +25,4 @@ CUDA_VISIBLE_DEVICES=3 python render.py \
 
 # --input_path outputs/${log}/${name}/${logdir}/render/train
 
+bash ./render.sh drjohnson db 1000 outputs/db/drjohnson/sizegs_gpcc_no_raht_v1/2025-04-09_15:17:35

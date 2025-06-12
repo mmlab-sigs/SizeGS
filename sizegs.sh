@@ -12,7 +12,7 @@ device=$9
 prune_per=${10}
 fluc_percent=${11}
 time=$(date "+%Y-%m-%d_%H:%M:%S")
-logdir=sizegs_gpcc_rebuttal
+logdir=diff_fluc_percent
 csv_path=outputs/0_exp_data/$log/$logdir.csv
 
 mkdir outputs/0_exp_data/${log}
