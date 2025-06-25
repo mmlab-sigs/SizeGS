@@ -584,7 +584,7 @@ def training(dataset: ModelParams, opt, pipe, dataset_name, testing_iterations, 
         dataset.raht, pipe.n_block, dataset.unit_length, 
         dataset.use_pcc, logger, dataset.enable_octree_training,
         dataset.enable_drop, dataset.bit_upper_bound, dataset.bit_lower_bound,
-        dataset.save_raht)
+        dataset.save_raht, dataset.use_torchac)
     
     scene = Scene(dataset, gaussians, load_iteration=load_iteration, shuffle=False)
     all_anchor_size = int(gaussians._anchor.shape[0])
@@ -598,6 +598,10 @@ def training(dataset: ModelParams, opt, pipe, dataset_name, testing_iterations, 
             imp = cal_imp(gaussians, scene.getTrainCameras(), pipe, background)
             # print(imp.shape)
         imp = imp.detach()
+        if dataset.use_search_prune:
+            os.makedirs(os.path.join(scene.model_path, "zip"), exist_ok=True)
+            save_dir = os.path.join(scene.model_path, "zip/iteration_-1")
+            dataset.percent = gaussians.search_tau(save_dir, imp, pipe.n_block, dataset.target_size * 1024 * 1024)
         # purne_percent = get_percent(dataset.target_size*1024*1024, best_qbit*73, pipe.n_block, all_anchor_size, offset)
         purne_percent = dataset.percent
         # print(purne_percent)
@@ -605,7 +609,7 @@ def training(dataset: ModelParams, opt, pipe, dataset_name, testing_iterations, 
         remain_imp = imp[torch.logical_not(pmask)]
         gaussians.prune_anchor_no_grad(pmask)
     logger.info('cal imp: {}'.format(time.time() - bg))
-    
+    print('purne_percent', purne_percent)
     # start after-pruning warm up
     gaussians.training_setup(opt)
     gaussians.train()
@@ -681,7 +685,7 @@ def training(dataset: ModelParams, opt, pipe, dataset_name, testing_iterations, 
                 loss, 
                 l1_loss, 
                 elapsed_time, 
-                [500, 1000, 1500, 2000], 
+                [1000], 
                 scene, 
                 render, 
                 (pipe, background), 
@@ -769,7 +773,7 @@ def training(dataset: ModelParams, opt, pipe, dataset_name, testing_iterations, 
             elapsed_time = iter_start.elapsed_time(iter_end)
             finetune_time += elapsed_time
             # Log and save
-            training_report(tb_writer, dataset_name, iteration, Ll1, loss, l1_loss, elapsed_time, [500, 1000, 1500, 2000], scene, render, (pipe, background), wandb, logger)
+            training_report(tb_writer, dataset_name, iteration, Ll1, loss, l1_loss, elapsed_time, [1000], scene, render, (pipe, background), wandb, logger)
                     
             # Optimizer step
             if iteration < opt.octree_iterations:
@@ -840,6 +844,8 @@ def training(dataset: ModelParams, opt, pipe, dataset_name, testing_iterations, 
             bg = time.time()
             gaussians.update_bqa(qbits=torch.tensor(cha_qbits, device="cuda").reshape(-1, 1).repeat(1, gaussians.n_block))
             actual_size = scene.save_compressed(0) * 8 # bits
+            # np.save(f'{scene.model_path}/ingredients/coarse_qbits.npy', np.array(cha_qbits))
+            # exit(0)
             save_time += (time.time() - bg)
             if i > 0:
                 delta_actual_size = actual_size - actual_sizes[-1] + 0.1
@@ -921,6 +927,7 @@ def training(dataset: ModelParams, opt, pipe, dataset_name, testing_iterations, 
                 warmup=True
                 gaussians.update_bqa(qbits=final_qbits)
                 actual_size = scene.save_compressed(0) * 8 # bits
+                # np.save(f'{scene.model_path}/ingredients/fine_qbits.npy', final_qbits.cpu().numpy())
                 save_time += (time.time() - bg)
                 
                 if j > 0:
@@ -945,7 +952,9 @@ def training(dataset: ModelParams, opt, pipe, dataset_name, testing_iterations, 
                 # logger.info(f"{j} estimate_size: {estimate_size / 8 / 1024/1024}")
                 # logger.info(f"{j} delta_size: {delta_size / 8 / 1024/1024}")
                 # logger.info(f"{j} qbit_size_limit: {qbit_size_limit / 8 / 1024/1024} MB, {qbit_size_limit} bits")
-                
+        
+        # print('save last qf.npy')
+        # exit(0)
         
         final_qbit_est_size = final_qbit_size_estimator(final_qbits, gaussians.dp_split, gaussians.n_channel, gaussians.n_block, dataset.enable_drop)
         # print('final_qbits.shape', final_qbits.shape)
@@ -1229,6 +1238,7 @@ def render_set(model_path, name, iteration, views, gaussians, pipeline, backgrou
             psnrs.append(psnr(rendering, gt))
             ssims.append(ssim(rendering, gt))
             lpipss.append(lpips_fn(rendering, gt))
+        torch.cuda.empty_cache()
 
     t = np.array(t_list[5:])
     fps = 1.0 / t.mean()
@@ -1265,7 +1275,7 @@ def render_sets(train_ds : ModelParams, iteration : int, pipeline : PipelinePara
             dataset.add_cov_dist, dataset.add_color_dist, 
             raht=dataset.raht, n_block=pipeline.n_block, unit_length=dataset.unit_length, 
             use_pcc=dataset.use_pcc, logger=logger, enable_octree_training=False, enable_drop=dataset.enable_drop,
-            bit_upper_bound=dataset.bit_upper_bound, bit_lower_bound=dataset.bit_lower_bound, save_raht=dataset.save_raht)
+            bit_upper_bound=dataset.bit_upper_bound, bit_lower_bound=dataset.bit_lower_bound, save_raht=dataset.save_raht, use_torchac=dataset.use_torchac)
         scene = Scene(dataset, gaussians, load_iteration=iteration, shuffle=False, load_compressed=load_compressed)
         gaussians.eval()
 
@@ -1280,7 +1290,7 @@ def render_sets(train_ds : ModelParams, iteration : int, pipeline : PipelinePara
             logger.info(f'Train FPS: \033[1;35m{train_fps.item():.5f}\033[0m')
             if wandb is not None:
                 wandb.log({"train_fps":train_fps.item(), })
-
+        torch.cuda.empty_cache()
         if not skip_test:
             t_test_list, visible_count, pp, ss, ll = render_set(dataset.model_path, "test", scene.loaded_iter, scene.getTestCameras(), gaussians, pipeline, background, cal_metric)
             test_fps = 1.0 / torch.tensor(t_test_list[5:]).mean()

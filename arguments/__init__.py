@@ -98,6 +98,8 @@ class ModelParams(ParamGroup):
         self.dis_type=3
         self.csv_path=""
         self.fluc_percent = 0.05
+        self.use_search_prune = False
+        self.use_torchac = False
         super().__init__(parser, "Loading Parameters", sentinel)
 
     def extract(self, args):

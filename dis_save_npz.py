@@ -10,7 +10,9 @@
 #
 import os
 import torch
-
+        
+# import numpy as np
+from scipy.stats import pearsonr
 import numpy as np
 # import mediapy as media
 from matplotlib import cm
@@ -259,53 +261,61 @@ def render_set(model_path, name, iteration, views, gaussians, pipeline, backgrou
     with open(os.path.join(model_path, name, "ours_{}".format(iteration), "per_view_count.json"), 'w') as fp:
             json.dump(per_view_dict, fp, indent=True)      
     print(psnr_val, ssim_val, lpips_val)
-     
+
+def compute_entropy_np(data):
+    """
+    Faster entropy computation using numpy.
+    """
+    values, counts = np.unique(data, return_counts=True)
+    probs = counts / counts.sum()
+    entropy = -np.sum(probs * np.log2(probs + 1e-12))  # 避免 log(0)
+    return entropy
+
 def render_sets(dataset : ModelParams, iteration : int, pipeline : PipelineParams, skip_train : bool, skip_test : bool, logger, input_path : str = None, name : str = None):
-	dataset.mesongs = False
-	load_compressed=True
-	with torch.no_grad():
-		gaussians = GaussianModel(
-			scene_name=dataset.scene_name, 
-			feat_dim=dataset.feat_dim, 
-			n_offsets=dataset.n_offsets, 
-			voxel_size=dataset.voxel_size, 
-			update_depth=dataset.update_depth, 
-			update_init_factor=dataset.update_init_factor, 
-			update_hierachy_factor=dataset.update_hierachy_factor, 
-			use_feat_bank=dataset.use_feat_bank, 
-			appearance_dim=dataset.appearance_dim, 
-			ratio=dataset.ratio, 
-			add_opacity_dist=dataset.add_opacity_dist, 
-			add_cov_dist=dataset.add_cov_dist, 
-			add_color_dist=dataset.add_color_dist,
-			enable_drop=dataset.enable_drop,
-			use_pcc=True, 
-			logger=logger)
-		scene = Scene(dataset, gaussians, load_iteration=iteration, shuffle=False, load_compressed=load_compressed)
-		
-		gaussians.eval()
-  
-		C = torch.concat([
-            gaussians._anchor_feat.detach(), #32
-            gaussians._offset.detach().flatten(-2).contiguous(), # 30
-            gaussians._opacity.detach().contiguous(), #1
-            gaussians._scaling.detach(), #6
-            gaussians._rotation.detach()], -1) #4
-		channel_entropies = []
-		for i in range(C.shape[0]):
-			channel_entropies.append(compute_entropy(C[i]))
+    dataset.mesongs = False
+    load_compressed=True
+    with torch.no_grad():
+        gaussians = GaussianModel(
+            scene_name=dataset.scene_name, 
+            feat_dim=dataset.feat_dim, 
+            n_offsets=dataset.n_offsets, 
+            voxel_size=dataset.voxel_size, 
+            update_depth=dataset.update_depth, 
+            update_init_factor=dataset.update_init_factor, 
+            update_hierachy_factor=dataset.update_hierachy_factor, 
+            use_feat_bank=dataset.use_feat_bank, 
+            appearance_dim=dataset.appearance_dim, 
+            ratio=dataset.ratio, 
+            add_opacity_dist=dataset.add_opacity_dist, 
+            add_cov_dist=dataset.add_cov_dist, 
+            add_color_dist=dataset.add_color_dist,
+            enable_drop=dataset.enable_drop,
+            use_pcc=True, 
+            logger=logger)
+        zip_path = os.path.join(dataset.load_path, 'zip', "iteration_" + str(iteration))
+        qbit_path = os.path.join(dataset.load_path, 'ingredients/final_qbits.npy')
+        qbits = np.load(qbit_path)
+        sm_qbits = np.sum(qbits, axis=-1)
+        print(sm_qbits)
+        C = gaussians.load_quant(zip_path).transpose(0, 1).cpu().numpy()
+		# scene = Scene(dataset, gaussians, load_iteration=iteration, shuffle=False, load_compressed=load_compressed)
+        # print(C.shape)
+        channel_entropies = []
+        for i in range(C.shape[0]):
+            channel_entropies.append(compute_entropy_np(C[i]))
+        print(channel_entropies)
 
-		
+        corr, p_value = pearsonr(sm_qbits, channel_entropies)
+        print(f"Pearson相关系数: {corr}, p值: {p_value}")
+        # bg_color = [1,1,1] if dataset.white_background else [0, 0, 0]
+        # background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
+        # if not os.path.exists(dataset.model_path):
+        #     os.makedirs(dataset.model_path)
 
-		bg_color = [1,1,1] if dataset.white_background else [0, 0, 0]
-		background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
-		if not os.path.exists(dataset.model_path):
-			os.makedirs(dataset.model_path)
-
-		render_set(dataset.model_path, "test", scene.loaded_iter, scene.getTestCameras(), gaussians, pipeline, background)
-		zip_path = os.path.join(dataset.model_path, 'zip', f'iteration_{iteration}', 'bins.zip')
-		sz = os.path.getsize(zip_path)
-		print(f'size: {sz / 1024 / 1024} MB')
+        # render_set(dataset.model_path, "test", scene.loaded_iter, scene.getTestCameras(), gaussians, pipeline, background)
+        # zip_path = os.path.join(dataset.model_path, 'zip', f'iteration_{iteration}', 'bins.zip')
+        # sz = os.path.getsize(zip_path)
+        # print(f'size: {sz / 1024 / 1024} MB')
     # A = torch.tensor(np.load("ingredients/A.npy"), dtype=int, device="cuda")
     # final_qbits = torch.tensor(np.load("ingredients/final_qbits.npy"), dtype=int, device="cuda")
     # model_size_limit = (dataset.target_size - 2) * 1024 * 1024 * 8

@@ -10,6 +10,7 @@
 #
 
 import torch
+import torchac
 from functools import reduce
 import numpy as np
 from torch_scatter import scatter_max
@@ -24,9 +25,13 @@ from utils.general_utils import strip_symmetric, build_scaling_rotation
 from scene.embedding import Embedding
 import shutil
 import time
+import tempfile
 
-
-from utils.compression import create_octree, decode_oct, create_octree_train, d1halfing_fast, sorted_voxels, write_ply_geo_ascii, gpcc_encode, gpcc_decode, read_ply_geo_bin, decode_v, compress_gpcc, decompress_gpcc
+from utils.compression import (
+    create_octree, decode_oct, create_octree_train, 
+    d1halfing_fast, sorted_voxels, write_ply_geo_ascii, 
+    gpcc_encode, gpcc_decode, read_ply_geo_bin, decode_v, 
+    compress_gpcc, decompress_gpcc, estimate_gaussian_params_1d, gaussian_pmf, encode_chunk)
 from utils.quant_utils import VanillaQuan, BatchQuant, split_length, dp_split, pure_quant, quant_reverse, cal_diff_wrapper, pure_quant_wo_minmax, Quantize_anchor, calculate_morton_order,  cal_diff_square_wrapper, cal_diff_infinity_wrapper
 from raht_torch import copyAsort, haar3D_param, inv_haar3D_param, itransform_batched_torch, transform_batched_torch
 class GaussianModel:
@@ -72,7 +77,8 @@ class GaussianModel:
                  enable_drop: bool = False,
                  bit_upper_bound: int = 16,
                  bit_lower_bound: int = 1,
-                 save_raht: bool = False
+                 save_raht: bool = False,
+                 use_torchac: bool = False
                  ):
 
         self.scene_name = scene_name
@@ -128,6 +134,7 @@ class GaussianModel:
         self.enable_anchor_quant = True
         self.save_raht = save_raht
         self.training = False
+        self.use_torchac = use_torchac
         
         if self.use_feat_bank:
             self.mlp_feature_bank = nn.Sequential(
@@ -735,120 +742,260 @@ class GaussianModel:
         # update self.n_channel:
         # self.logger.info('save compressed n_channel'.format(self.n_channel))
         # exit(0)
+        # np.save(f'{model_path}/ingredients/of.npy', features.cpu().numpy())
+        # if torch.isnan(features).any():
+        #     print("features contains NaNs!")
+        # else:
+        #     print("features is clean.")
         if self.raht:
             ff = features[0]
             qf, sz, maxvals, minvals = self.apply_quant_forward(features[1:], n_iter=n_iter)
         else:
             qf, sz, maxvals, minvals = self.apply_quant_forward(features, n_iter=n_iter)
 
-        np.save(f'{model_path}/ingredients/maxvals.npy', maxvals.cpu().numpy())
-        np.save(f'{model_path}/ingredients/minvals.npy', minvals.cpu().numpy())
-        
+        # if torch.isnan(features).any():
+        #     print("features contains NaNs!")
+        # else:
+        #     print("features is clean.")
+        # np.save(f'{model_path}/ingredients/maxvals.npy', maxvals.cpu().numpy())
+        # np.save(f'{model_path}/ingredients/minvals.npy', minvals.cpu().numpy())
+        # np.save(f'{model_path}/ingredients/qf.npy', qf.cpu().numpy())
         trans.extend(sz)
+        ft = features.transpose(0,1)
         cum_split = torch.cumsum(self.dp_split[0].reshape(-1), dim=0).int()
         assert cum_split[-1] == self.n_rf, "wrong cum split!"
         
         # print('fucking cum_split', cum_split)
         # print('self.channel_check[0, 0]', self.channel_check[0, 0])
-        qf_8 = []
-        qf_16 = []
-        sum_l = 0
-        # print('n_channel', self.n_channel)
-        # print('n_block', self.n_block) 
-        self.logger.info('qf.shape {}'.format(qf.shape))
-        
-        if self.enable_drop:
-            n_c = self.n_channel-3
-        else:
-            n_c = self.n_channel
-        
-        for c in range(n_c):
-            for b in range(self.n_block):
-                if b == 0:
-                    si = 0
-                else:
-                    si = int(cum_split[b-1].item())
-                ei = int(cum_split[b].item())
-                # print(si, ei)
-                if self.channel_check[c, b]:
-                    sum_l += int(qf[c, si:ei].shape[-1])
-                    # print(qf[c, si:ei])
-                    qf_8.append(qf[c, si:ei].clone())
-                else:
-                    sum_l += int(qf[c, si:ei].shape[-1])
-                    qf_16.append(qf[c, si:ei].clone())
-        # print(len(qf_8))
-        # print(len(qf_16))
-        # print('len(qf_8[0])', len(qf_8[0]))
-        self.logger.info('sum_l {}'.format(sum_l))
-        qf_8 = torch.concat(qf_8) if qf_8 != [] else torch.tensor([], dtype=torch.uint8)
-        self.logger.info('qf_8.shape {}'.format(qf_8.shape))
-        qf_8 = qf_8.cpu().numpy().astype(np.uint8)
-        qf_16 = torch.concat(qf_16) if qf_16 != [] else torch.tensor([], dtype=torch.int)
-        self.logger.info('qf_16.shape {}'.format(qf_16.shape))
-        qf_16 = qf_16.cpu().numpy().astype(np.uint16)
-        # print('qf_8.shape[0]', qf_8.shape[0])
-        # print('qf_16.shape[0]', qf_16.shape[0])
-        # np.save('exp_data/qf_8.npy', qf_8)
-        # np.save('exp_data/qf_16.npy', qf_16)
-        # np.save('exp_data/channel_check.npy', self.channel_check.cpu().numpy())
-        
-        if self.use_pcc and self.save_raht:
-            tmp_dir = os.path.join(save_dir)
-            os.makedirs(tmp_dir, exist_ok=True)
-            ply_path = os.path.join(tmp_dir, 'voxelized_means.ply')
-            means_bin_path = os.path.join(bin_dir, 'compressed.bin')
-            write_ply_geo_ascii(geo_data=self.V, ply_path=ply_path)
-            gpcc_encode(
-                ply_path=ply_path, 
-                bin_path=means_bin_path)
-            oct_bytes = os.path.getsize(means_bin_path)
-            np.savez_compressed(
-                os.path.join(bin_dir, 'fe'), 
-                f=ff.cpu().numpy(), 
-                i_8=qf_8, 
-                i_16=qf_16, 
-                t=trans, 
-                h=self.channel_check.cpu().numpy(), 
-                o=self.oct_param)#这里需要改一下
-        elif self.use_pcc:
+        if self.use_torchac:
+            min_values = []
+            max_values = []
+            sum_l = 0
+            # print('n_channel', self.n_channel)
+            # print('n_block', self.n_block) 
+            # self.logger.info('qf.shape {}'.format(qf.shape))
+            
+            if self.enable_drop:
+                n_c = self.n_channel-3
+            else:
+                n_c = self.n_channel
+            mu_mat = np.zeros([n_c, self.n_block])
+            sigma_mat = np.zeros([n_c, self.n_block])
+            l_sz = len(sz) // 2
+            scale_vals = sz[:l_sz]
+            zero_vals = sz[l_sz:]
+            for c in range(n_c):
+                for b in range(self.n_block):
+                    if b == 0:
+                        si = 0
+                    else:
+                        si = int(cum_split[b-1].item())
+                    ei = int(cum_split[b].item())
+                    x_group = qf[c, si:ei]
+                    mu, sigma = estimate_gaussian_params_1d(ft[c, si:ei])
+                    mu_mat[c][b] = mu 
+                    sigma_mat[c][b] = sigma
+                    min_val = x_group.min().item()
+                    max_val = x_group.max().item()
+                    x_vals = torch.arange(min_val, max_val + 1 + 1, dtype=torch.long).to(torch.float).to('cuda') # [M]
+                    GD = torch.distributions.normal.Normal(mu, sigma)
+                    lower = GD.cdf((x_vals.float() - 0.5 - zero_vals[c*self.n_block+b])*scale_vals[c * self.n_block + b]).unsqueeze(0).repeat(x_group.shape[0], 1)
+                    # print('lower.shape', lower.shape)
+                    x_int_round_idx = (x_group - min_val).to(torch.int16)
+                    byte_stream = torchac.encode_float_cdf(lower.cpu(), x_int_round_idx.cpu(), check_input_bounds=True)
+                    min_values.append(min_val)
+                    max_values.append(max_val)
+                    with open(os.path.join(bin_dir, f'c{c}_b{b}.b'), 'wb') as f:
+                        f.write(byte_stream)
             _anchor_int = torch.round(self._anchor.detach() / self.voxel_size)
             npz_path= os.path.join(bin_dir, 'xyz_gpcc.npz')
             means_strings = compress_gpcc(_anchor_int)
             np.savez_compressed(npz_path, means_strings=means_strings)
             oct_bytes = os.path.getsize(npz_path)
             np.savez_compressed(
-                os.path.join(bin_dir, 'fe'), 
-                i_8=qf_8, 
-                i_16=qf_16, 
+                os.path.join(bin_dir, 'fe'),
                 t=trans, 
+                mu=mu_mat,
+                sig=sigma_mat,
+                minv=np.array(min_values),
+                maxv=np.array(max_values),
                 h=self.channel_check.cpu().numpy() if isinstance(self.channel_check, torch.Tensor) else self.channel_check)#这里需要改一下
-        else:
-            np.savez_compressed(os.path.join(bin_dir, 'oct'), points=self.oct)
-            np.savez_compressed(
-                os.path.join(bin_dir, 'fe'), 
-                f=ff.cpu().numpy(), 
-                i_8=qf_8, 
-                i_16=qf_16, 
-                t=trans, 
-                h=self.channel_check.cpu().numpy(),
-                o=self.oct_param
-            )#这里需要改一下
+        else: 
+            qf_8 = []
+            qf_16 = []
+            sum_l = 0
+            # print('n_channel', self.n_channel)
+            # print('n_block', self.n_block) 
+            # self.logger.info('qf.shape {}'.format(qf.shape))
+            
+            if self.enable_drop:
+                n_c = self.n_channel-3
+            else:
+                n_c = self.n_channel
+            
+            for c in range(n_c):
+                for b in range(self.n_block):
+                    if b == 0:
+                        si = 0
+                    else:
+                        si = int(cum_split[b-1].item())
+                    ei = int(cum_split[b].item())
+                    # print(si, ei)
+                    if self.channel_check[c, b]:
+                        sum_l += int(qf[c, si:ei].shape[-1])
+                        # print(qf[c, si:ei])
+                        qf_8.append(qf[c, si:ei].clone())
+                    else:
+                        sum_l += int(qf[c, si:ei].shape[-1])
+                        qf_16.append(qf[c, si:ei].clone())
+            # print(len(qf_8))
+            # print(len(qf_16))
+            # print('len(qf_8[0])', len(qf_8[0]))
+            # self.logger.info('sum_l {}'.format(sum_l))
+            qf_8 = torch.concat(qf_8) if qf_8 != [] else torch.tensor([], dtype=torch.uint8)
+            # self.logger.info('qf_8.shape {}'.format(qf_8.shape))
+            qf_8 = qf_8.cpu().numpy().astype(np.uint8)
+            qf_16 = torch.concat(qf_16) if qf_16 != [] else torch.tensor([], dtype=torch.int)
+            # self.logger.info('qf_16.shape {}'.format(qf_16.shape))
+            qf_16 = qf_16.cpu().numpy().astype(np.uint16)
+            # print('qf_8.shape[0]', qf_8.shape[0])
+            # print('qf_16.shape[0]', qf_16.shape[0])
+            # np.save('exp_data/qf_8.npy', qf_8)
+            # np.save('exp_data/qf_16.npy', qf_16)
+            # np.save('exp_data/channel_check.npy', self.channel_check.cpu().numpy())
+            
+            if self.use_pcc and self.save_raht:
+                tmp_dir = os.path.join(save_dir, 'tmp')
+                os.makedirs(tmp_dir, exist_ok=True)
+                ply_path = os.path.join(tmp_dir, 'voxelized_means.ply')
+                means_bin_path = os.path.join(bin_dir, 'compressed.bin')
+                write_ply_geo_ascii(geo_data=self.V, ply_path=ply_path)
+                gpcc_encode(
+                    ply_path=ply_path, 
+                    bin_path=means_bin_path)
+                oct_bytes = os.path.getsize(means_bin_path)
+                np.savez_compressed(
+                    os.path.join(bin_dir, 'fe'), 
+                    f=ff.cpu().numpy(), 
+                    i_8=qf_8, 
+                    i_16=qf_16, 
+                    t=trans, 
+                    h=self.channel_check.cpu().numpy(), 
+                    o=self.oct_param)#这里需要改一下
+            elif self.use_pcc:
+                _anchor_int = torch.round(self._anchor.detach() / self.voxel_size)
+                npz_path= os.path.join(bin_dir, 'xyz_gpcc.npz')
+                means_strings = compress_gpcc(_anchor_int)
+                np.savez_compressed(npz_path, means_strings=means_strings)
+                oct_bytes = os.path.getsize(npz_path)
+                np.savez_compressed(
+                    os.path.join(bin_dir, 'fe'), 
+                    i_8=qf_8, 
+                    i_16=qf_16, 
+                    t=trans, 
+                    h=self.channel_check.cpu().numpy() if isinstance(self.channel_check, torch.Tensor) else self.channel_check)#这里需要改一下
+            else:
+                np.savez_compressed(os.path.join(bin_dir, 'oct'), points=self.oct)
+                np.savez_compressed(
+                    os.path.join(bin_dir, 'fe'), 
+                    f=ff.cpu().numpy(), 
+                    i_8=qf_8, 
+                    i_16=qf_16, 
+                    t=trans, 
+                    h=self.channel_check.cpu().numpy(),
+                    o=self.oct_param
+                )#这里需要改一下
 
         self.save_mlp_checkpoints(bin_dir)
         
         bin_zip_path = os.path.join(save_dir, 'bins.zip')
-        os.system(f'zip -j {bin_zip_path} {bin_dir}/*')
+        os.system(f'zip -jq {bin_zip_path} {bin_dir}/*')
         zip_file_size = os.path.getsize(bin_zip_path)
         
         # print('final sum:', zip_file_size , 'B')
         # print('final sum:', zip_file_size / 1024, 'KB')
         # print('final sum:', zip_file_size / 1024 / 1024, 'MB')
-        self.logger.info("saving time: {}".format(time.time() - st_time))
+        self.logger.info("saving time: {}, size: {} MB".format(time.time() - st_time, zip_file_size / 1024 / 1024))
         if return_path:
             return zip_file_size, bin_zip_path
         else:
             return zip_file_size
+    
+    def search_tau(self, save_dir, imps, n_block, target_size_bytes):        
+        l_tau = 0.01
+        r_tau = 0.99
+        while abs(r_tau - l_tau) > 0.05:
+            m_tau = l_tau + (r_tau - l_tau) / 2
+            save_size_bytes = self.check_tau(save_dir, imps, m_tau, n_block)   
+            if target_size_bytes * 0.8 < save_size_bytes and save_size_bytes < target_size_bytes * 1.2:
+                return m_tau
+            elif save_size_bytes <= target_size_bytes * 0.8:
+                l_tau = m_tau 
+            else:
+                r_tau = m_tau
+        
+    def check_tau(self, save_dir, imps, tau, n_block):
+        '''
+        tau: reserve ratio
+        '''
+        
+        rf = self.get_detached_features()
+        anchors = self._anchor.detach()
+        npoint = int(rf.shape[0] * tau)
+        idx = torch.argsort(imps, dim=0, descending=True)
+        # index_nth_percentile = int((1 - save_percent) * (sorted_tensor.shape[0] - 1))
+        selected_idx = idx[:npoint]
+        rf = rf[selected_idx]
+        anchors = anchors[selected_idx]
+        
+        trans = [self.voxel_size, self.n_block]
+        _anchor_int = torch.round(anchors / self.voxel_size)
+        sorted_indices = calculate_morton_order(_anchor_int)
+        anchors = anchors[sorted_indices]
+        rf = rf[sorted_indices]
+        n_channel = rf.shape[-1]
+        qbits = torch.ones([n_channel, n_block]) * 8
+        splits = [split_length(npoint, n_block)]*n_channel 
+        splits = torch.tensor(splits).cuda()
+        assert splits.shape[0] == n_channel
+        # tmp_bqa = BatchQuant(n_channel, n_block, qbits)
+        qf, scales, zero_points, max_vals, min_vals = pure_quant_wo_minmax(
+            rf,
+            splits,
+            power_qbits=qbits.cuda().to(torch.int32)
+        )
+        sz = torch.concat([scales.reshape(-1), zero_points.reshape(-1)], dim = 0)
+        trans.extend(sz.cpu().tolist())
+        qf = qf.cpu().numpy().astype(np.uint8)
+        
+        os.makedirs(save_dir, exist_ok=True)
+        bin_dir = os.path.join(save_dir, 'test_bins')
+        if os.path.exists(bin_dir):
+            shutil.rmtree(bin_dir) 
+        os.mkdir(bin_dir)
+        
+        _anchor_int = torch.round(self._anchor.detach() / self.voxel_size)
+        npz_path= os.path.join(bin_dir, 'xyz_gpcc.npz')
+        means_strings = compress_gpcc(_anchor_int)
+        np.savez_compressed(npz_path, means_strings=means_strings)
+        np.savez_compressed(
+            os.path.join(bin_dir, 'fe'), 
+            f=qf,
+            t=np.array(trans))
+        self.save_mlp_checkpoints(bin_dir)
+        bin_zip_path = os.path.join(save_dir, 'tmp_bins.zip')
+        if os.path.exists(bin_zip_path):
+            os.system(f'rm {bin_zip_path}')
+        
+        os.system(f'zip -j {bin_zip_path} {bin_dir}/*')
+        zip_file_size = os.path.getsize(bin_zip_path)
+        print('zip_file_size', zip_file_size / 1024 / 1024, 'MB')
+        return zip_file_size # B
+        #这里需要改一下
+        # with tempfile.TemporaryDirectory() as tmpdir:
+        #     print(f"Temporary directory created: {tmpdir}")
+        #     bin_dir = os.path.join(tmpdir, 'bins')
+            
     
     # if return_remain:
     #         trans_size = (n_c * self.n_block * 2 * 32 + 2 * 32) / 8 # scale and zero points, n_block, depth
@@ -886,28 +1033,20 @@ class GaussianModel:
         os.makedirs(tmp_dir)
         # self.logger.info(f"load self.save_raht: {self.save_raht}")
         
-        if self.use_pcc and self.save_raht:
+        if self.use_torchac:
             attris = np.load(os.path.join(bin_dir, 'fe.npz'))
             trans = attris['t']
             self.channel_check = attris['h']
-            self.depth = int(trans[0])
-            self.n_block = int(trans[1])
-            ply_path = os.path.join(tmp_dir, 'voxelized_means.ply')
-            means_bin_path = os.path.join(bin_dir, 'compressed.bin')
-            gpcc_decode(bin_path=means_bin_path, recon_path=ply_path)
-            voxelized_means = read_ply_geo_bin(ply_path=ply_path).astype(np.float32)
-            oct_param = attris['o']
-            ff = torch.tensor(attris['f'], dtype=torch.float32).cuda()
-            dxyz, V = decode_v(oct_param, voxelized_means, self.depth)
-            # decode features
-        elif self.use_pcc:
-            attris = np.load(os.path.join(bin_dir, 'fe.npz'))
-            trans = attris['t']
-            self.channel_check = attris['h']
-            
+            mu = attris['mu']
+            sig = attris['sig']
+            min_values = attris['minv']
+            max_values = attris['maxv']
             self.voxel_size = float(trans[0])
             self.n_block = int(trans[1])
-            
+            sz = trans[2:]
+            l_sz = len(sz) // 2
+            scale_vals = sz[:l_sz]
+            zero_vals = sz[l_sz:]
             npz_path = os.path.join(bin_dir, 'xyz_gpcc.npz')
             data_dict = np.load(npz_path)
             
@@ -917,71 +1056,142 @@ class GaussianModel:
             _anchor_int_dec = _anchor_int_dec[sorted_indices]
             dxyz = _anchor_int_dec * self.voxel_size
             
+            self.n_channel = self.channel_check.shape[0]
+            if self.enable_drop:
+                self.n_channel += 3
+            
+            self.n_point = dxyz.shape[0]
+            if self.save_raht:
+                self.n_rf = self.n_point - 1
+            else:
+                self.n_rf = self.n_point
+            # print('self.n_point', self.n_point)
+            splits = split_length(self.n_rf, self.n_block) # [B]
+            splits = [splits] * self.n_channel # [C, B] list 
+            splits = torch.tensor(splits)
+            cum_split = torch.cumsum(splits[0], dim=0).reshape(-1)
+            
+            if self.enable_drop:
+                n_c = self.n_channel - 3
+            else:
+                n_c = self.n_channel
+                
+            qf = torch.zeros([n_c, self.n_point])
+    
+            for c in range(n_c):
+                for b in range(self.n_block):
+                    if b == 0:
+                        si = 0
+                    else:
+                        si = int(cum_split[b-1].item())
+                    ei = int(cum_split[b].item())
+                    idx = c * self.n_block + b
+                    with open(os.path.join(bin_dir, f'c{c}_b{b}.b'), 'rb') as f:
+                        byte_stream_d = f.read()
+                        # byte_stream_d = torch.frombuffer(byte_data, dtype=torch.uint8)
+                    x_vals = torch.tensor(range(int(min_values[idx]), int(max_values[idx]) + 1 + 1)).to(torch.float).to('cuda')
+                    # print('mu[c][b], sig[c][b]', mu[c][b], sig[c][b])
+                    GD = torch.distributions.normal.Normal(mu[c][b], sig[c][b])
+                    lower = GD.cdf((x_vals.float() - 0.5 - zero_vals[c*self.n_block+b])*scale_vals[c * self.n_block + b]).unsqueeze(0).repeat(ei - si, 1)
+                    qf[c, si:ei] = torchac.decode_float_cdf(lower.cpu(), byte_stream_d).int() + int(min_values[idx])
+            qf = qf.cuda().transpose(0, 1)
         else:
-            oct_vals = np.load(os.path.join(bin_dir, 'oct.npz'))
-            octree = oct_vals["points"]
-            oct_param = oct_vals["params"]
-            # xyz = oct_vals["xyz"]
-            attris = np.load(os.path.join(bin_dir, 'fe.npz'))
-        
-        
-        self.n_channel = self.channel_check.shape[0]
-        if self.enable_drop:
-            self.n_channel += 3
-        
-        self.logger.info('self n_channel {}'.format(self.n_channel))
-        
-        i_8 = torch.tensor(attris['i_8'], dtype=torch.float32).cuda()
-        self.logger.info('self i_8 {}'.format(i_8.shape))
-        i_16_np = attris['i_16'].astype(np.int32)
-        i_16 = torch.tensor(i_16_np, dtype=torch.float32).cuda()
-        self.logger.info('self i_16 {}'.format(i_16.shape))
-        # print('i_8.shape', i_8.shape)
-        # print('i_16.shape)', i_16.shape)
-        self.n_point = dxyz.shape[0]
-        if self.save_raht:
-            self.n_rf = self.n_point - 1
-        else:
-            self.n_rf = self.n_point
-        # print('self.n_point', self.n_point)
-        splits = split_length(self.n_rf, self.n_block) # [B]
-        splits = [splits] * self.n_channel # [C, B] list 
-        # print('splits', splits)
-        # print('splits', len(splits), len(splits[0]))
-        # self.dp_split = torch.tensor(splits, device="cuda",)
-        # cum_split = torch.cumsum(torch.tensor(splits)).int()
-        # f = open('exp_data/idx816.txt', 'w')
-        qf = []
-        idx8 = 0
-        idx16 = 0
-        # print('self.n_channel', self.n_channel)
-        if self.enable_drop:
-            n_c = self.n_channel - 3
-        else:
-            n_c = self.n_channel
-        # n_c = self.n_channel
-        for c in range(n_c):
-            cq = []
-            ci = 0
-            for b in range(self.n_block):
-                glen = splits[c][b]
-                if self.channel_check[c, b]:
-                    cq.append(i_8[idx8:idx8+glen])
-                    idx8 += glen 
-                else:
-                    cq.append(i_16[idx16:idx16+glen])
-                    idx16 += glen 
-                ci += glen 
-                # f.write(f'{idx8} {idx16}\n')
-            cq = torch.concat(cq, dim=-1).reshape(1, -1) # [1, N-1]
-            # print('cq.shape', cq.shape)
-            qf.append(cq)
-        # f.close()
-        # print('idx8', idx8)
-        # print('idx16', idx16)
-        # print(len(qf), type(qf[0]), qf[0].shape)
-        qf = torch.concat(qf, dim=0).cuda().transpose(0, 1)
-        # print(qf.shape) # must be [N-1, C]
+            if self.use_pcc and self.save_raht:
+                attris = np.load(os.path.join(bin_dir, 'fe.npz'))
+                trans = attris['t']
+                self.channel_check = attris['h']
+                self.depth = int(trans[0])
+                self.n_block = int(trans[1])
+                ply_path = os.path.join(tmp_dir, 'voxelized_means.ply')
+                means_bin_path = os.path.join(bin_dir, 'compressed.bin')
+                gpcc_decode(bin_path=means_bin_path, recon_path=ply_path)
+                voxelized_means = read_ply_geo_bin(ply_path=ply_path).astype(np.float32)
+                oct_param = attris['o']
+                ff = torch.tensor(attris['f'], dtype=torch.float32).cuda()
+                dxyz, V = decode_v(oct_param, voxelized_means, self.depth)
+                # decode features
+            elif self.use_pcc:
+                attris = np.load(os.path.join(bin_dir, 'fe.npz'))
+                trans = attris['t']
+                self.channel_check = attris['h']
+                
+                self.voxel_size = float(trans[0])
+                self.n_block = int(trans[1])
+                
+                npz_path = os.path.join(bin_dir, 'xyz_gpcc.npz')
+                data_dict = np.load(npz_path)
+                
+                means_strings = data_dict['means_strings'].tobytes()
+                _anchor_int_dec = decompress_gpcc(means_strings).to('cuda')
+                sorted_indices = calculate_morton_order(_anchor_int_dec)
+                _anchor_int_dec = _anchor_int_dec[sorted_indices]
+                dxyz = _anchor_int_dec * self.voxel_size
+                
+            else:
+                oct_vals = np.load(os.path.join(bin_dir, 'oct.npz'))
+                octree = oct_vals["points"]
+                oct_param = oct_vals["params"]
+                # xyz = oct_vals["xyz"]
+                attris = np.load(os.path.join(bin_dir, 'fe.npz'))
+            
+            
+            self.n_channel = self.channel_check.shape[0]
+            if self.enable_drop:
+                self.n_channel += 3
+            
+            self.logger.info('self n_channel {}'.format(self.n_channel))
+            
+            i_8 = torch.tensor(attris['i_8'], dtype=torch.float32).cuda()
+            self.logger.info('self i_8 {}'.format(i_8.shape))
+            i_16_np = attris['i_16'].astype(np.int32)
+            i_16 = torch.tensor(i_16_np, dtype=torch.float32).cuda()
+            self.logger.info('self i_16 {}'.format(i_16.shape))
+            # print('i_8.shape', i_8.shape)
+            # print('i_16.shape)', i_16.shape)
+            self.n_point = dxyz.shape[0]
+            if self.save_raht:
+                self.n_rf = self.n_point - 1
+            else:
+                self.n_rf = self.n_point
+            # print('self.n_point', self.n_point)
+            splits = split_length(self.n_rf, self.n_block) # [B]
+            splits = [splits] * self.n_channel # [C, B] list 
+            # print('splits', splits)
+            # print('splits', len(splits), len(splits[0]))
+            # self.dp_split = torch.tensor(splits, device="cuda",)
+            # cum_split = torch.cumsum(torch.tensor(splits)).int()
+            # f = open('exp_data/idx816.txt', 'w')
+            qf = []
+            idx8 = 0
+            idx16 = 0
+            # print('self.n_channel', self.n_channel)
+            if self.enable_drop:
+                n_c = self.n_channel - 3
+            else:
+                n_c = self.n_channel
+            # n_c = self.n_channel
+            for c in range(n_c):
+                cq = []
+                ci = 0
+                for b in range(self.n_block):
+                    glen = splits[c][b]
+                    if self.channel_check[c, b]:
+                        cq.append(i_8[idx8:idx8+glen])
+                        idx8 += glen 
+                    else:
+                        cq.append(i_16[idx16:idx16+glen])
+                        idx16 += glen 
+                    ci += glen 
+                    # f.write(f'{idx8} {idx16}\n')
+                cq = torch.concat(cq, dim=-1).reshape(1, -1) # [1, N-1]
+                # print('cq.shape', cq.shape)
+                qf.append(cq)
+            # f.close()
+            # print('idx8', idx8)
+            # print('idx16', idx16)
+            # print(len(qf), type(qf[0]), qf[0].shape)
+            qf = torch.concat(qf, dim=0).cuda().transpose(0, 1)
+            # print(qf.shape) # must be [N-1, C]
         
         assert qf.shape[0] == self.n_rf, "false qf length"
         self.dp_split = torch.tensor(splits, device="cuda", dtype=torch.int)
@@ -2197,6 +2407,172 @@ class GaussianModel:
         B_flat = B.flatten().cpu().tolist()
         return A, B_flat, npc
 
+    def load_quant(self, save_path):
+        # self.use_pcc = use_pcc
+        t = time.time()
+        if save_path[-4:] == '.zip':
+            print('Assume the input file path is a .zip file')
+            
+            bin_dir = os.path.join('/'.join(save_path.split('/')[:-1]), 'bins_tmp')
+            tmp_dir = os.path.join('/'.join(save_path.split('/')[:-1]), 'tmp2')
+            if os.path.exists(bin_dir):
+                shutil.rmtree(bin_dir)
+            os.system(f'unzip {save_path} -d {bin_dir}')
+        else:
+            print('Assume the input file path is a dir that contains a \'bins\' dir')
+            bin_dir = os.path.join(save_path, 'bins')
+            tmp_dir = os.path.join(save_path, 'tmp2')
+        print('load ply from:', bin_dir)
+        
+        if os.path.exists(tmp_dir):
+            shutil.rmtree(tmp_dir)
+        os.makedirs(tmp_dir)
+        # self.logger.info(f"load self.save_raht: {self.save_raht}")
+        
+        if self.use_pcc and self.save_raht:
+            attris = np.load(os.path.join(bin_dir, 'fe.npz'))
+            trans = attris['t']
+            self.channel_check = attris['h']
+            self.depth = int(trans[0])
+            self.n_block = int(trans[1])
+            ply_path = os.path.join(tmp_dir, 'voxelized_means.ply')
+            means_bin_path = os.path.join(bin_dir, 'compressed.bin')
+            gpcc_decode(bin_path=means_bin_path, recon_path=ply_path)
+            voxelized_means = read_ply_geo_bin(ply_path=ply_path).astype(np.float32)
+            oct_param = attris['o']
+            ff = torch.tensor(attris['f'], dtype=torch.float32).cuda()
+            dxyz, V = decode_v(oct_param, voxelized_means, self.depth)
+            # decode features
+        elif self.use_pcc:
+            attris = np.load(os.path.join(bin_dir, 'fe.npz'))
+            trans = attris['t']
+            self.channel_check = attris['h']
+            
+            self.voxel_size = float(trans[0])
+            self.n_block = int(trans[1])
+            
+            npz_path = os.path.join(bin_dir, 'xyz_gpcc.npz')
+            data_dict = np.load(npz_path)
+            
+            means_strings = data_dict['means_strings'].tobytes()
+            _anchor_int_dec = decompress_gpcc(means_strings).to('cuda')
+            sorted_indices = calculate_morton_order(_anchor_int_dec)
+            _anchor_int_dec = _anchor_int_dec[sorted_indices]
+            dxyz = _anchor_int_dec * self.voxel_size
+            
+        else:
+            oct_vals = np.load(os.path.join(bin_dir, 'oct.npz'))
+            octree = oct_vals["points"]
+            oct_param = oct_vals["params"]
+            # xyz = oct_vals["xyz"]
+            attris = np.load(os.path.join(bin_dir, 'fe.npz'))
+        
+        
+        self.n_channel = self.channel_check.shape[0]
+        if self.enable_drop:
+            self.n_channel += 3
+        
+        self.logger.info('self n_channel {}'.format(self.n_channel))
+        
+        i_8 = torch.tensor(attris['i_8'], dtype=torch.float32).cuda()
+        self.logger.info('self i_8 {}'.format(i_8.shape))
+        i_16_np = attris['i_16'].astype(np.int32)
+        i_16 = torch.tensor(i_16_np, dtype=torch.float32).cuda()
+        self.logger.info('self i_16 {}'.format(i_16.shape))
+        # print('i_8.shape', i_8.shape)
+        # print('i_16.shape)', i_16.shape)
+        self.n_point = dxyz.shape[0]
+        if self.save_raht:
+            self.n_rf = self.n_point - 1
+        else:
+            self.n_rf = self.n_point
+        # print('self.n_point', self.n_point)
+        splits = split_length(self.n_rf, self.n_block) # [B]
+        splits = [splits] * self.n_channel # [C, B] list 
+        # print('splits', splits)
+        # print('splits', len(splits), len(splits[0]))
+        # self.dp_split = torch.tensor(splits, device="cuda",)
+        # cum_split = torch.cumsum(torch.tensor(splits)).int()
+        # f = open('exp_data/idx816.txt', 'w')
+        qf = []
+        idx8 = 0
+        idx16 = 0
+        # print('self.n_channel', self.n_channel)
+        if self.enable_drop:
+            n_c = self.n_channel - 3
+        else:
+            n_c = self.n_channel
+        # n_c = self.n_channel
+        for c in range(n_c):
+            cq = []
+            ci = 0
+            for b in range(self.n_block):
+                glen = splits[c][b]
+                if self.channel_check[c, b]:
+                    cq.append(i_8[idx8:idx8+glen])
+                    idx8 += glen 
+                else:
+                    cq.append(i_16[idx16:idx16+glen])
+                    idx16 += glen 
+                ci += glen 
+                # f.write(f'{idx8} {idx16}\n')
+            cq = torch.concat(cq, dim=-1).reshape(1, -1) # [1, N-1]
+            # print('cq.shape', cq.shape)
+            qf.append(cq)
+        # f.close()
+        # print('idx8', idx8)
+        # print('idx16', idx16)
+        # print(len(qf), type(qf[0]), qf[0].shape)
+        qf = torch.concat(qf, dim=0).cuda().transpose(0, 1)
+        # print(qf.shape) # must be [N-1, C]
+        return qf.int()
+        # assert qf.shape[0] == self.n_rf, "false qf length"
+        # self.dp_split = torch.tensor(splits, device="cuda", dtype=torch.int)
+        
+        # # print(ff.shape, dqf.shape)
+        # if self.save_raht:
+        #     dqf = self.apply_quant_reverse(n_c, qf, trans, 2) # [N-1, C-3]
+        #     fe = torch.concat([ff.reshape(1, -1), dqf], dim=0)
+        # else:
+        #     fe = self.apply_quant_reverse(n_c, qf, trans, 2)
+            
+        # if self.enable_drop:
+        #     fe = torch.concat([fe, torch.zeros(fe.shape[0], 3).cuda()], dim=-1)
+        
+        # assert fe.shape[-1] == 73, "wrong fe shape"
+        
+        # if self.save_raht:
+        #     # morton sort
+        #     _, _, reorder = copyAsort(V)
+        #     V = V[reorder]
+        #     dxyz = dxyz[reorder]
+            
+        #     # finally, apply reverse raht to obtain features
+        #     fe = self.apply_raht_reverse(V, fe, self.depth)
+        
+        # if isinstance(dxyz, torch.Tensor):
+        #     self._anchor = nn.Parameter(dxyz.clone().cuda().requires_grad_(False))
+        # else:
+        #     self._anchor = nn.Parameter(torch.tensor(dxyz, dtype=torch.float, device="cuda").requires_grad_(False))
+        # base = 0
+        # self._anchor_feat = nn.Parameter(fe[:, base:base + self.feat_dim].cuda().contiguous().requires_grad_(True))
+        # base += self.feat_dim #47
+        # self._offset = nn.Parameter(fe[:, base:base + self.n_offsets*3].reshape([-1, self.n_offsets, 3]).cuda().contiguous().requires_grad_(True))
+        # base += self.n_offsets*3  #62
+        # self._opacity = nn.Parameter(fe[:, base:base+1].cuda().requires_grad_(True))
+        # base += 1 #63
+        # self._scaling = nn.Parameter(fe[:, base:base+6].cuda().requires_grad_(True))
+        # base += 6 #69
+        # self._rotation = nn.Parameter(fe[:, base:base+4].cuda().requires_grad_(True))
+        # base += 4 #73
+        # self.logger.info('base, feature size {}'.format(base))
+        # self.n_channel = base
+        
+        # self.load_mlp_checkpoints(bin_dir)
+        
+        # torch.cuda.empty_cache()
+        # self.logger.info('load time {}'.format(time.time()-t))
+        
     # quantC = torch.zeros_like(C)
     # quantC[0] = C[0]
     # qa_cnt = 0

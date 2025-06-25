@@ -6,6 +6,8 @@ from typing import Union
 from plyfile import PlyData
 import os
 from tempfile import TemporaryDirectory
+import torchac 
+import math
 
 class UniqueWithGrad(torch.autograd.Function):
     @staticmethod
@@ -282,7 +284,7 @@ def sorted_voxels(voxelized_means: np.ndarray, other_params = None) -> Union[np.
     return voxelized_means, other_params, indices_sorted
 
 
-def gpcc_encode(ply_path: str, bin_path: str, encoder_path='~/storage/mpeg-pcc-tmc13/build/tmc3/tmc3') -> None:
+def gpcc_encode(ply_path: str, bin_path: str, encoder_path='~/mpeg-pcc-tmc13/build/tmc3/tmc3') -> None:
     """
     Compress geometry point cloud by GPCC codec.
     """
@@ -296,7 +298,7 @@ def gpcc_encode(ply_path: str, bin_path: str, encoder_path='~/storage/mpeg-pcc-t
     assert exit_code == 0, f'GPCC encoder failed with exit code {exit_code}.'
 
 
-def gpcc_decode(bin_path: str, recon_path: str, decoder_path='~/storage/mpeg-pcc-tmc13/build/tmc3/tmc3') -> None:
+def gpcc_decode(bin_path: str, recon_path: str, decoder_path='~/mpeg-pcc-tmc13/build/tmc3/tmc3') -> None:
     """
     Decompress geometry point cloud by GPCC codec.
     """
@@ -334,7 +336,7 @@ def read_ply_geo_bin(ply_path: str) -> np.ndarray:
     means = np.stack([ply_data.data[name] for name in ['x', 'y', 'z']], axis=1)  # shape (N, 3)
     return means
 
-def compress_gpcc(x: torch.Tensor, gpcc_codec_path: str='~/storage/mpeg-pcc-tmc13/build/tmc3/tmc3') -> bytes:
+def compress_gpcc(x: torch.Tensor, gpcc_codec_path: str='~/mpeg-pcc-tmc13/build/tmc3/tmc3') -> bytes:
     """
     Compress geometry point cloud by GPCC codec.
     """
@@ -349,7 +351,7 @@ def compress_gpcc(x: torch.Tensor, gpcc_codec_path: str='~/storage/mpeg-pcc-tmc1
             strings = f.read()
     return strings
 
-def decompress_gpcc(strings: bytes, gpcc_codec_path: str='~/storage/mpeg-pcc-tmc13/build/tmc3/tmc3') -> torch.Tensor:
+def decompress_gpcc(strings: bytes, gpcc_codec_path: str='~/mpeg-pcc-tmc13/build/tmc3/tmc3') -> torch.Tensor:
     """
     Decompress geometry point cloud by GPCC codec.
     """
@@ -418,3 +420,34 @@ def decompress_gpcc(strings: bytes, gpcc_codec_path: str='~/storage/mpeg-pcc-tmc
 #     ki = ki.detach().cpu().numpy()
 
 #     return d_xyz, features, ki, paramarr, V, octree_imp, ori_points_num, final_points_num
+
+
+def estimate_gaussian_params_1d(chunk_float):
+    mu = chunk_float.mean()
+    sigma = chunk_float.std(unbiased=False) + 1e-6
+    return mu, sigma
+
+def gaussian_pmf(x, mu, sigma, bin_width=1.0):
+    mu = mu.unsqueeze(0) if mu.dim() == 0 else mu
+    sigma = sigma.unsqueeze(0) if sigma.dim() == 0 else sigma
+
+    coef = 1.0 / (math.sqrt(2 * math.pi) * sigma)
+    exp_term = torch.exp(-0.5 * ((x - mu) / sigma) ** 2)
+    pdf = coef * exp_term
+    pmf = pdf * bin_width
+    pmf = pmf / pmf.sum()
+    return pmf
+
+def encode_chunk(chunk_int, pmf, x_vals):
+    val_to_idx = {v.item(): i for i, v in enumerate(x_vals)}
+
+    indices = torch.zeros_like(chunk_int, dtype=torch.long)
+    for v in val_to_idx:
+        indices[chunk_int == v] = val_to_idx[v]
+
+    cdf = torch.cumsum(pmf, dim=0)
+    cdf = torch.cat([torch.tensor([0.0]), cdf])
+    cdf = cdf.clamp(0, 1)
+
+    stream = torchac.encode_cdf(cdf, indices)
+    return stream
