@@ -33,8 +33,10 @@ CUDA 12.1/12.4:
 ```shell
 conda create -n sizegs python=3.10
 conda activate sizegs
-pip install torch==2.2.2+cu121 torchvision==0.17.2+cu121 torchaudio==2.2.2+cu121 --index-url https://download.pytorch.org/whl/cu121
-pip install torch-scatter -f https://data.pyg.org/whl/torch-2.2.2+cu121.html
+# pip install torch==2.2.2+cu121 
+pip install /mnt/storage/users/szxie_data/install_packages/torch-2.2.2+cu121-cp310-cp310-linux_x86_64.whl
+pip install torchvision==0.17.2+cu121 torchaudio==2.2.2+cu121 --index-url https://download.pytorch.org/whl/cu121
+pip install torch-scatter torch-cluster -f https://data.pyg.org/whl/torch-2.2.2+cu121.html
 pip install tqdm plyfile einops wandb lpips laspy colorama jaxtyping opencv-python tensorboard loguru pulp Ninja open3d torchac
 pip install submodules/diff-gaussian-rasterization
 pip install submodules/simple-knn
