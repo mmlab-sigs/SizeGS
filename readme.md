@@ -35,7 +35,7 @@ conda create -n sizegs python=3.10
 conda activate sizegs
 pip install torch==2.2.2+cu121 torchvision==0.17.2+cu121 torchaudio==2.2.2+cu121 --index-url https://download.pytorch.org/whl/cu121
 pip install torch-scatter -f https://data.pyg.org/whl/torch-2.2.2+cu121.html
-pip install tqdm plyfile einops wandb lpips laspy colorama jaxtyping opencv-python tensorboard loguru pulp Ninja open3d
+pip install tqdm plyfile einops wandb lpips laspy colorama jaxtyping opencv-python tensorboard loguru pulp Ninja open3d torchac
 pip install submodules/diff-gaussian-rasterization
 pip install submodules/simple-knn
 pip install submodules/octree
@@ -43,21 +43,21 @@ pip install submodules/quant
 pip install submodules/seg-quant
 pip install numpy==1.26.4
 
-cd submodules/BDD
-git checkout f377a82736435bc4988e2c41e5c8029c168e9505
-setup.py line 94: set 
-cmake_args = ['-DCMAKE_LIBRARY_OUTPUT_DIRECTORY=' + extdir,
-    '-DPYTHON_EXECUTABLE=' + sys.executable,
-    '-DCMAKE_CUDA_COMPILER=/usr/local/cuda-12.4/bin/nvcc',
-    '-DCUDA_NVCC_EXECUTABLE=/usr/local/cuda-12.4/bin/nvcc',
-    '-DTHRUST_DEVICE_SYSTEM=THRUST_DEVICE_SYSTEM_CUDA'
-]
-sudo apt-get update
-sudo apt-get upgrade
-sudo apt-get install libboost-all-dev
-cd ../../
-pip install submodules/BDD
-conda update -c conda-forge libstdcxx-ng
+# cd submodules/BDD
+# git checkout f377a82736435bc4988e2c41e5c8029c168e9505
+# setup.py line 94: set 
+# cmake_args = ['-DCMAKE_LIBRARY_OUTPUT_DIRECTORY=' + extdir,
+#     '-DPYTHON_EXECUTABLE=' + sys.executable,
+#     '-DCMAKE_CUDA_COMPILER=/usr/local/cuda-12.4/bin/nvcc',
+#     '-DCUDA_NVCC_EXECUTABLE=/usr/local/cuda-12.4/bin/nvcc',
+#     '-DTHRUST_DEVICE_SYSTEM=THRUST_DEVICE_SYSTEM_CUDA'
+# ]
+# sudo apt-get update
+# sudo apt-get upgrade
+# sudo apt-get install libboost-all-dev
+# cd ../../
+# pip install submodules/BDD
+# conda update -c conda-forge libstdcxx-ng
 ```
 
 ### 2.3 Preparing dataset and pre-trained ScaffoldGSes

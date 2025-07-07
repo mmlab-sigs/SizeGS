@@ -13,6 +13,7 @@ import os
 import random
 import json
 import shutil
+import torch
 from utils.system_utils import searchForMaxIteration
 from scene.dataset_readers import sceneLoadTypeCallbacks
 from scene.gaussian_model import GaussianModel
@@ -116,6 +117,7 @@ class Scene:
         else:
             self.gaussians.create_from_pcd(scene_info.point_cloud, self.cameras_extent)
         
+        torch.cuda.empty_cache()
         self.gaussians.set_spatial_lr_scale(self.cameras_extent)
 
     def save(self, iteration):

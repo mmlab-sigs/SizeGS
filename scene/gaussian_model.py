@@ -1011,6 +1011,7 @@ class GaussianModel:
     #         remain_bytes = mlp_size + trans_size + channel_check + oct_param + dc_size + oct_bytes
     #         return zip_file_size, remain_bytes
     
+    @torch.no_grad()
     def load_compressed(self, save_path):
         # self.use_pcc = use_pcc
         t = time.time()
@@ -1156,6 +1157,7 @@ class GaussianModel:
             # print('self.n_point', self.n_point)
             splits = split_length(self.n_rf, self.n_block) # [B]
             splits = [splits] * self.n_channel # [C, B] list 
+            splits = torch.tensor(splits)
             # print('splits', splits)
             # print('splits', len(splits), len(splits[0]))
             # self.dp_split = torch.tensor(splits, device="cuda",)
@@ -1194,7 +1196,8 @@ class GaussianModel:
             # print(qf.shape) # must be [N-1, C]
         
         assert qf.shape[0] == self.n_rf, "false qf length"
-        self.dp_split = torch.tensor(splits, device="cuda", dtype=torch.int)
+        # print('load compressed type(splits)', type(splits))
+        self.dp_split = splits.clone().cuda().int()
         
         # print(ff.shape, dqf.shape)
         if self.save_raht:
