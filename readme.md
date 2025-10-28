@@ -1,4 +1,4 @@
-# Size-aware Compression of 3D Gaussians with Hierarchical Mixed Precision Quantization
+# SizeGS: Size-aware Compression of 3D Gaussian Splatting via Mixed Integer Programming
 
 ## 1. Cloning the Repository
 
