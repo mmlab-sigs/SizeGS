@@ -126,13 +126,13 @@ At last change the ```path/to/outputs/``` and ```path/to/data/``` in meson.sh wi
 If you find our work helpful, please consider citing:
 
 ```bibtex
-@article{xie2024sizegs,
-    title={SizeGS: Size-aware Compression of 3D Gaussians with Hierarchical Mixed Precision Quantization},
-    author={Xie, Shuzhao and Liu, Jiahang and Zhang, Weixiang and Ge, Shijia and Pan, Sicheng and Tang, Chen and Bai, Yunpeng and Wang, Zhi},
-    journal={arXiv},
-    year={2024}
+@inproceedings{xie2024sizegs,
+    title={SizeGS: Size-aware Compression of 3D Gaussian Splatting via Mixed Integer Programming},
+    author={Xie, Shuzhao and Liu, Jiahang and Zhang, Weixiang and Ge, Shijia and Pan, Sicheng and Tang, Chen and Bai, Yunpeng and Zhang, Cong and Fan, Xiaoyi and Wang, Zhi},
+    booktitle={ACM MM},
+    year={2025}
 }
 ```
 
 ## 5. Acknowledgments
-This work is supported in part by National Key Research and Development Project of China (Grant No. 2023YFF0905502), Shenzhen Science and Technology Program (Grant No. JCYJ20220818101014030). We thank the valuable advices from anonymous ICLR and CVPR reviewers.
+We sincerely thank the anonymous reviewers from ICLR, CVPR, and ACM MM for their valuable feedback and suggestions. We also thank our lab mates for their help in improving the manuscript. This work is supported in part by National Key Research and Development Project of China (Grant No. 2023YFF0905502), National Natural Science Foundation of China (Grant No. 92467204 and 62472249), and Shenzhen Science and Technology Program (Grant No. JCYJ20220818101014030 and KJZD20240903102300001).
