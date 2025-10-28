@@ -256,171 +256,6 @@ def final_qbit_size_estimator(qbits, splits, n_channel, n_block, enable_drop: bo
             qbsz += qbits[i, j] * splits[i, j]
     return qbsz
 
-# def solve_finer_01_ilp_problem(L, n_bit, low_bit, n_channel, n_block, splits, qbit_size):
-#     n_variable = n_bit * n_channel * n_block
-#     objective = {}
-#     size_coni = {}
-#     for i in range(n_variable):
-#         objective[f"x{i}"] = L[i]
-#         re = (i % n_bit) + 1
-#         cbi = int(i // n_bit)
-#         ci = int(cbi // n_block) 
-#         bi = int(cbi % n_block)
-#         coni_arg = re * int(splits[ci, bi].item()) / 8
-#         size_coni[f"x{i}"] = coni_arg
-        
-#     constraints = []
-#     # TODO: add size constraint
-#     # n_cons = 1
-#     constraints.append([
-#         f'C1',
-#         size_coni,
-#         '<',
-#         qbit_size
-#     ])
-#     for i in range(n_channel * n_block):
-#         coni = [f'C{i+2}']
-#         coni_dict = {}
-#         for j in range(n_bit):
-#             coni_dict[f"x{i*n_bit+j}"] = 1.0
-#         coni.append(coni_dict)
-#         coni.append('=')
-#         coni.append(1.0)
-#         # print(coni)
-#         constraints.append(coni)
-    
-#     # objective = {'x1': 2.0, 'x2': 1.0, 'x3': -1.0, 'x4': 1.0, 'x5': -2.0, 'x6': -5.0}
-#     # constraints = [
-#     #     ['C1', {'x1': 1.0, 'x2': 1.0, 'x3': 1.0}, '=', 1.0],
-#     #     ['C2', {'x3': 1.0, 'x4': 1.0, 'x5': 1.0}, '<', 1.0],
-#     #     ['C3', {'x4': 1.0, 'x5': 1.0, 'x6': 1.0}, '>', 1.0]
-#     # ]
-#     ilp = ilp_instance.ILP_instance()
-#     for var_name, coeff in objective.items():
-#         ilp.add_new_variable_with_obj(var_name, coeff)
-
-#     for con in constraints:
-#         con_name = con[0]
-#         con_vars = list(con[1].keys())
-#         con_coeffs = list(con[1].values())
-#         con_coeffs = [int(c) for c in con_coeffs] # Only integer coefficients are supported.
-#         con_sense = con[2]
-#         rhs_value = int(con[3]) # Only integer right hand side value is supported.
-#         if con_sense == '=':
-#             ineq_type = ilp_instance.equal
-#         elif con_sense == '<':
-#             ineq_type = ilp_instance.smaller_equal
-#         else:
-#             assert(con_sense == '>')
-#             ineq_type = ilp_instance.greater_equal
-#         ilp.add_new_constraint(con_name, con_vars, con_coeffs, rhs_value, ineq_type)
-    
-#     # passing ilp instance to solver options
-#     opts = bdd_solver_options(ilp)
-#     # this setting enables finding a primal feasible solution. If this is false only a lower bound will be computed.
-#     opts.incremental_primal_rounding = True
-#     # initialize solver
-#     solver = bdd_solver(opts)
-#     # solve dual problem
-#     solver.solve_dual()
-#     lower_bound = solver.lower_bound()
-#     # run primal heuristic
-#     upper_bound, sol = solver.round()
-#     # extracting the solution as a numpy array
-#     sol_numpy = np.array(sol)
-    
-#     sol_tensor = torch.tensor(sol).reshape(n_channel, n_block, n_bit)
-#     # print(sol_numpy)
-#     sol_tensor_sum = torch.sum(sol_tensor, dim=-1)
-#     # print('diff 1', torch.sum(torch.square(sol_tensor_sum - torch.ones_like(sol_tensor_sum))))
-
-#     qbits = np.zeros([n_channel, n_block]).astype(int)
-#     for i in range(n_channel):
-#         for j in range(n_block):
-#             for k in range(n_bit):
-#                 if sol_numpy[i*n_block*n_bit + j*n_bit + k] != 0:
-#                     qbits[i, j] = k+low_bit
-                    
-#     return qbits
-
-# def solve_coarse_01_ilp_problem(L, n_bit, low_bit, n_channel, n_point, qbit_size):
-#     n_variable = n_bit * n_channel
-#     objective = {}
-#     size_coni = {}
-#     assert len(L) == n_variable, "false L length"
-#     for i in range(n_variable):
-#         objective[f"x{i}"] = L[i]
-#         re = (i % n_bit) + 1
-#         coni_arg = re * (n_point - 1)
-#         size_coni[f"x{i}"] = coni_arg
-        
-#     constraints = []
-#     constraints.append([
-#         f'C1',
-#         size_coni,
-#         '<',
-#         qbit_size
-#     ])
-#     # TODO: add size constraint
-#     # n_cons = 1
-#     for i in range(n_channel):
-#         coni = [f'C{i+2}']
-#         coni_dict = {}
-#         for j in range(n_bit):
-#             coni_dict[f"x{i*n_bit+j}"] = 1
-#         coni.append(coni_dict)
-#         coni.append('=')
-#         coni.append(1)
-#         # print(coni)
-#         constraints.append(coni)
-    
-#     ilp = ilp_instance.ILP_instance()
-#     for var_name, coeff in objective.items():
-#         ilp.add_new_variable_with_obj(var_name, coeff)
-
-#     for con in constraints:
-#         con_name = con[0]
-#         con_vars = list(con[1].keys())
-#         con_coeffs = list(con[1].values())
-#         con_coeffs = [int(c) for c in con_coeffs] # Only integer coefficients are supported.
-#         con_sense = con[2]
-#         rhs_value = int(con[3]) # Only integer right hand side value is supported.
-#         if con_sense == '=':
-#             ineq_type = ilp_instance.equal
-#         elif con_sense == '<':
-#             ineq_type = ilp_instance.smaller_equal
-#         else:
-#             assert(con_sense == '>')
-#             ineq_type = ilp_instance.greater_equal
-#         ilp.add_new_constraint(con_name, con_vars, con_coeffs, rhs_value, ineq_type)
-    
-#     # passing ilp instance to solver options
-#     opts = bdd_solver_options(ilp)
-#     # this setting enables finding a primal feasible solution. If this is false only a lower bound will be computed.
-#     opts.incremental_primal_rounding = True
-#     # initialize solver
-#     solver = bdd_solver(opts)
-#     # solve dual problem
-#     solver.solve_dual()
-#     lower_bound = solver.lower_bound()
-#     # run primal heuristic
-#     upper_bound, sol = solver.round()
-#     # extracting the solution as a numpy array
-#     sol_numpy = np.array(sol)
-    
-#     sol_tensor = torch.tensor(sol).reshape(n_channel, n_bit)
-#     # print(sol_numpy)
-#     sol_tensor_sum = torch.sum(sol_tensor, dim=-1)
-#     # print('diff 1', torch.sum(torch.square(sol_tensor_sum - torch.ones_like(sol_tensor_sum))))
-
-#     qbits = np.zeros(n_channel).astype(int)
-#     for i in range(n_channel):
-#         for k in range(n_bit):
-#             if sol_numpy[i*n_bit + k] != 0:
-#                 qbits[i] = k+low_bit
-    
-#     return qbits
-
 def solve_coarse_ilp_pulp(
     L, rf, n_bit, low_bit, n_channel, n_block, n_rf, 
     qbit_size_limit, splits, enable_drop=False, use_entropy=False, 
@@ -449,7 +284,7 @@ def solve_coarse_ilp_pulp(
             variable[f"x{i}"].setInitialValue(vals[i])
 
     # 使用CBC求解器并设置时间限制
-    prob.solve(PULP_CBC_CMD(timeLimit=time_limit, msg=True))
+    prob.solve(PULP_CBC_CMD(timeLimit=time_limit, msg=False))
 
     solution = {}
     for i in range(num_variable):
@@ -464,38 +299,6 @@ def solve_coarse_ilp_pulp(
                 qbits[i] = j+low_bit 
     
     return qbits, ret_vals
-
-# def solve_channel_ilp_pulp(L, rf, n_bit, low_bit, n_block, n_point, splits: torch.Tensor, model_size_limit, use_entropy: bool):
-#     num_variable = n_block * n_bit 
-#     variable = {}
-#     for i in range(num_variable):
-#         variable[f"x{i}"] = LpVariable(f"x{i}", 0, 1, cat=LpInteger)
-#     prob = LpProblem("Model_Size", LpMinimize)
-
-#     prob += qbit_block_size_esimator([variable[f"x{i}"] for i in range(num_variable)], rf, n_bit, low_bit, n_block, splits, use_entropy) <= model_size_limit
-
-#     for le in range(0, n_block):
-#         ri = le * n_bit + n_bit
-#         prob += sum([variable[f"x{i}"] for i in range(le * n_bit, ri)]) == 1
-
-#     prob += sum([(variable[f"x{i}"]) * L[i] for i in range(num_variable)])
-
-#     time_limit = 200
-
-#     # 使用CBC求解器并设置时间限制
-#     prob.solve(PULP_CBC_CMD(timeLimit=time_limit, msg=True))
-
-#     solution = {}
-#     for i in range(num_variable):
-#         solution[f"x{i}"] = variable[f"x{i}"].varValue
-
-#     qbits = [0]*n_block
-#     for i in range(n_block):
-#         for j in range(n_bit):
-#             if variable[f"x{i*n_bit+j}"].varValue != 0:
-#                 qbits[i] = j+low_bit 
-    
-#     return qbits
 
 
 def solve_channel_ilp_pulp(L, n_bit, low_bit, n_block, splits, model_size_limit, use_entropy: bool, time_limit, warmup=False, vals=None):
@@ -523,7 +326,7 @@ def solve_channel_ilp_pulp(L, n_bit, low_bit, n_block, splits, model_size_limit,
                 
             
     # 使用CBC求解器并设置时间限制
-    prob.solve(PULP_CBC_CMD(timeLimit=time_limit, msg=True))
+    prob.solve(PULP_CBC_CMD(timeLimit=time_limit, msg=False))
 
     solution = {}
     for i in range(num_variable):

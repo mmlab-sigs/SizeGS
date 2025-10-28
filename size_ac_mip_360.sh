@@ -22,15 +22,16 @@
 # 21
 # 26
 # echo "Running for name: bicycle, iter: 6000"
-# bash ./sizegs.sh bicycle 6000 4000 4000 0.0001 360_v2 60 33 1
+bash ./sizegs_torchac.sh bicycle 6000 4000 4000 0.0001 360_v2 60 33 2 0.5 0.05
 # echo "Completed for name: bicycle"
 # sleep 1s
 
-echo "Running for name: garden, iter: 6000"
-bash ./sizegs_torchac.sh garden 4000 4000 4000 0.001 360_v2 60 28 2 0.5 0.05
-echo "Completed for name: garden"
+# echo "Running for name: garden, iter: 6000"
+# bash ./sizegs_torchac.sh garden 10 10 10 0.001 360_v2 60 28 2 0.5 0.05 # @Jiahang TODO: 为什么会garden会爆显存？而bicycle不会？ Fixing now
 
-# bash ./sizegs_torchac.sh garden 10 10 100 0.001 360_v2 60 28 2 0.5 0.05 
+echo "Running for name: garden, iter: 6000"
+bash ./sizegs_torchac.sh garden 4000 4000 4000 0.0001 360_v2 60 28 2 0.5 0.05 
+echo "Completed for name: garden"
 
 # echo "Running for name: stump, iter: 6000"
 bash ./sizegs_torchac.sh stump 4000 4000 4000 0.001 360_v2 60 32 2 0.5 0.05

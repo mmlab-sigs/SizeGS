@@ -646,19 +646,20 @@ class GaussianModel:
         return OC
         
     
-    def apply_quant_forward(self, f, n_iter=10000):     
+    def apply_quant_forward(self, f, n_iter=10000): 
+        channel_len = f.shape[1]
         if n_iter == 0:
             # print(self.dp_split)
             # print(self.bqa.qbits)
             outputs, scales, zero_points, max_vals, min_vals = pure_quant_wo_minmax(
                 f,
-                self.dp_split,
+                self.dp_split[:channel_len],
                 power_qbits=self.bqa.qbits.to(torch.int32)
             )
         else:
             outputs, scales, zero_points = pure_quant(
                 f,
-                self.dp_split,
+                self.dp_split[:channel_len],
                 power_qbits=self.bqa.qbits.to(torch.int32),
                 min_vals=self.bqa.min_vals.detach(),
                 max_vals=self.bqa.max_vals.detach()
@@ -734,6 +735,8 @@ class GaussianModel:
             self.logger.info('enable drop 3 channels')
             features = features[:, :70]
             assert ori_fchannel - features.shape[-1] == 3, "wrong feature size"
+            # Fix at here
+            # self.dp_split = self.dp_split[:70]
         else:
             self.logger.info('disable drop 3 channels')
         # self.logger.info('save_compressed features.shape {}'.format(features.shape))

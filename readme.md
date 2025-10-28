@@ -19,23 +19,13 @@ git clone https://github.com/mmlab-sigs/sizegs --recursive
 
 ### 2.2 Setup
 Our provided install method is based on Conda package and environment management:
-<!-- 
-CUDA 11.6/11.8: 
-
-```shell
-conda env create --file environment.yml
-conda activate sizegs
-pip install plyfile tqdm einops scipy open3d trimesh Ninja seaborn loguru pandas
-``` -->
 
 CUDA 12.1/12.4:
 
 ```shell
 conda create -n sizegs python=3.10
 conda activate sizegs
-# pip install torch==2.2.2+cu121 
-pip install /mnt/storage/users/szxie_data/install_packages/torch-2.2.2+cu121-cp310-cp310-linux_x86_64.whl
-pip install torchvision==0.17.2+cu121 torchaudio==2.2.2+cu121 --index-url https://download.pytorch.org/whl/cu121
+pip install torch==2.2.2+cu121 torchvision==0.17.2+cu121 torchaudio==2.2.2+cu121 --index-url https://download.pytorch.org/whl/cu121
 pip install torch-scatter torch-cluster -f https://data.pyg.org/whl/torch-2.2.2+cu121.html
 pip install tqdm plyfile einops wandb lpips laspy colorama jaxtyping opencv-python tensorboard loguru pulp Ninja open3d torchac
 pip install submodules/diff-gaussian-rasterization
@@ -44,22 +34,6 @@ pip install submodules/octree
 pip install submodules/quant
 pip install submodules/seg-quant
 pip install numpy==1.26.4
-
-# cd submodules/BDD
-# git checkout f377a82736435bc4988e2c41e5c8029c168e9505
-# setup.py line 94: set 
-# cmake_args = ['-DCMAKE_LIBRARY_OUTPUT_DIRECTORY=' + extdir,
-#     '-DPYTHON_EXECUTABLE=' + sys.executable,
-#     '-DCMAKE_CUDA_COMPILER=/usr/local/cuda-12.4/bin/nvcc',
-#     '-DCUDA_NVCC_EXECUTABLE=/usr/local/cuda-12.4/bin/nvcc',
-#     '-DTHRUST_DEVICE_SYSTEM=THRUST_DEVICE_SYSTEM_CUDA'
-# ]
-# sudo apt-get update
-# sudo apt-get upgrade
-# sudo apt-get install libboost-all-dev
-# cd ../../
-# pip install submodules/BDD
-# conda update -c conda-forge libstdcxx-ng
 ```
 
 ### 2.3 Preparing dataset and pre-trained ScaffoldGSes
@@ -132,16 +106,22 @@ Take T&T as an example, the ```outputs/tandt``` structure should be organized as
 At last change the ```path/to/outputs/``` and ```path/to/data/``` in meson.sh with your path
 
 
-## Running
+## 3. Running
 
-Check `mesonmip_360.sh`.
-Check `mesondb.sh`.
-Check `mesonnerf.sh`.
-Check `mesontandt.sh`.
+### Use `torchac`
+* Check `size_ac_mip_360.sh`.
 
+### Use `LZ77 (zip)`
+* Check `size_mip_360.sh`.
 
+* Check `size_tandt.sh`.
 
-## Citation
+* Check `size_db.sh`.
+
+### TODO
+- [ ] lint the code.
+
+## 4. Citation
 
 If you find our work helpful, please consider citing:
 
@@ -154,5 +134,5 @@ If you find our work helpful, please consider citing:
 }
 ```
 
-## Acknowledgments
+## 5. Acknowledgments
 This work is supported in part by National Key Research and Development Project of China (Grant No. 2023YFF0905502), Shenzhen Science and Technology Program (Grant No. JCYJ20220818101014030). We thank the valuable advices from anonymous ICLR and CVPR reviewers.
